@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#15171c">
+  <title>Workboard</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/js/app.js" defer></script>
+  <script src="/js/knowledge.js" defer></script>
+</head>
+<body>
+  <div class="app-shell" id="appShell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <a class="brand" href="/" aria-label="Workboard ana sayfa">
+          <span class="brand-symbol"><i></i><i></i><i></i></span>
+          <span class="brand-name">workboard</span>
+        </a>
+        <button class="icon-btn sidebar-collapse" id="sidebarToggle" type="button" aria-label="Menüyü daralt" title="Menüyü daralt">
+          <svg viewBox="0 0 24 24"><path d="m14.5 5-7 7 7 7"/></svg>
+        </button>
+      </div>
+
+      <nav class="sidebar-nav" aria-label="Navigasyon">
+        <div class="quick-nav">
+          <button class="nav-link" data-view="inbox" type="button"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 13h5l2 3h2l2-3h5"/></svg><span>Inbox</span><span class="nav-count" id="inboxCount">0</span></button>
+          <button class="nav-link" data-view="today" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/></svg><span>Today</span><span class="nav-count" id="todayCount">0</span></button>
+          <button class="nav-link" data-view="upcoming" type="button"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 10h18"/></svg><span>Upcoming</span></button>
+          <button class="nav-link" data-view="completed" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16.5 9"/></svg><span>Completed</span></button>
+          <button class="nav-link" data-view="weekly" type="button"><svg viewBox="0 0 24 24"><path d="M4 19V5m0 14h16M7 15l4-4 3 2 5-7"/></svg><span>Weekly review</span></button>
+        </div>
+        <div class="quick-nav knowledge-nav-wrap">
+          <button class="nav-link knowledge-nav-link" id="knowledgeNav" type="button">
+            <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8.2 7.3 10.7 16M15.8 7.3 13.3 16M8.5 6h7"/></svg>
+            <span>Knowledge map</span>
+          </button>
+        </div>
+        <div class="sidebar-label-row"><span class="sidebar-label">LOOSE LISTS</span></div>
+        <button class="nav-link" id="independentNav" type="button">
+          <svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="7" height="7" rx="1.5"/><rect x="13.5" y="4" width="7" height="7" rx="1.5"/><rect x="3.5" y="13" width="7" height="7" rx="1.5"/><rect x="13.5" y="13" width="7" height="7" rx="1.5"/></svg>
+          <span>Loose lists</span><span class="nav-count" id="independentCount">0</span>
+        </button>
+
+        <div class="sidebar-label-row boards-label-row">
+          <span class="sidebar-label">BOARDS</span>
+          <button class="tiny-icon-btn" id="addBoardSidebar" type="button" aria-label="Board ekle" title="Board ekle">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+        <div class="board-list" id="boardList"><div class="sidebar-loading">Board'lar yükleniyor…</div></div>
+      </nav>
+
+
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div class="breadcrumbs" id="breadcrumbs">
+          <strong>Independent</strong>
+        </div>
+        <label class="search-field topbar-search" for="searchInput">
+          <svg viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4 4"/></svg>
+          <input id="searchInput" type="search" placeholder="Search tasks…" autocomplete="off">
+          <kbd>⌘ K</kbd>
+        </label>
+        <div class="topbar-right">
+          <span class="saved-indicator"><span class="saved-dot"></span><span id="lastUpdated">Kaydedildi</span></span>
+          <button class="button button-quiet walkthrough-launch" id="walkthroughLaunch" type="button" title="Özellikleri keşfet">✦ Walkthrough</button>
+          <button class="button button-quiet quick-capture-launch" id="quickCaptureLaunch" type="button" title="Quick Capture (Ctrl + Space)">＋ Capture</button>
+          <button class="icon-btn topbar-icon" id="refreshButton" type="button" title="Yenile" aria-label="Yenile">
+            <svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg>
+          </button>
+
+        </div>
+      </header>
+
+      <div class="workspace-content">
+        <section class="board-heading">
+          <div class="board-heading-main">
+            <div class="board-kicker" id="pageEyebrow">PERSONAL WORKSPACE</div>
+            <div class="board-title-line">
+              <h1 id="pageTitle">Independent</h1>
+              <button class="icon-btn board-edit-btn" id="boardEditButton" type="button" title="Board ayarları" aria-label="Board ayarları" hidden>
+                <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/><circle cx="12" cy="12" r="9"/></svg>
+              </button>
+            </div>
+            <p id="pageDescription">Board'a bağlı olmayan kolonların burada görünür.</p>
+          </div>
+          <div class="heading-actions">
+            <button class="button button-quiet" id="newBoardButton" type="button"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="7" height="16" rx="1.5"/><rect x="13.5" y="4" width="7" height="10" rx="1.5"/></svg><span>New board</span></button>
+            <button class="button button-outline clipboard-task-button" id="clipboardTaskButton" type="button" title="Panodaki metin veya görselle görev oluştur"><svg viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="17" rx="2"/><path d="M9 4.5h6V3h-6zM8 11h8M8 15h5"/></svg><span>Panodan ekle</span></button>
+            <button class="button button-primary" id="newTaskButton" type="button"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>Add task</span></button>
+          </div>
+        </section>
+        <section class="board-reference-links" id="boardReferenceLinks" aria-label="Board bağlantıları" hidden></section>
+
+        <section class="board-controls" aria-label="Board araçları">
+          <div class="board-controls-left">
+            <label class="filter-select-wrap" for="priorityFilter">
+              <svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10m-7 6h4"/></svg>
+              <select id="priorityFilter" aria-label="Önceliğe göre filtrele">
+                <option value="all">All priorities</option>
+                <option value="urgent">Urgent</option>
+                <option value="high">High</option>
+                <option value="normal">Normal</option>
+                <option value="low">Low</option>
+              </select>
+            </label>
+          </div>
+          <div class="board-controls-right">
+            <span class="board-count" id="boardCount">0 columns · 0 tasks</span>
+            <button class="button button-outline" id="newColumnButton" type="button"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>Add list</span></button>
+          </div>
+        </section>
+
+        <section class="board-scroll-area" id="boardScrollArea" aria-label="Kanban board">
+          <div class="columns-board" id="columnsBoard" aria-live="polite">
+            <div class="loading-state"><span class="loader"></span><span>Board yükleniyor…</span></div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- Board create / edit -->
+  <dialog class="modal" id="boardDialog">
+    <form class="modal-panel" id="boardForm" method="dialog">
+      <div class="modal-header"><div><span class="modal-eyebrow">WORKSPACE</span><h2 id="boardModalTitle">Create a board</h2></div><button class="modal-close" type="button" data-close="boardDialog" aria-label="Kapat">×</button></div>
+      <input type="hidden" id="boardId">
+      <label class="form-label" for="boardTitle">Board name</label>
+      <input class="form-input" id="boardTitle" maxlength="150" placeholder="e.g. Online Shop" required>
+      <label class="form-label" for="boardDescription">Description <span>Optional</span></label>
+      <textarea class="form-input form-textarea" id="boardDescription" rows="3" placeholder="What are you working on?"></textarea>
+      <div class="board-links-editor-heading">
+        <label class="form-label" for="boardLinksEditor">Links <span>Optional · add as many as you need</span></label>
+        <button class="button button-quiet board-add-link" id="addBoardLinkButton" type="button">＋ Add link</button>
+      </div>
+      <div class="board-links-editor" id="boardLinksEditor"></div>
+      <label class="form-label" for="boardColor">Board colour</label>
+      <div class="colour-input-row"><input id="boardColor" type="color" value="#4f86f7"><span>Used as the board accent</span></div>
+      <div class="modal-actions"><button class="button button-danger-quiet" id="deleteBoardButton" type="button" hidden>Delete board</button><span class="modal-actions-spacer"></span><button class="button button-quiet" type="button" data-close="boardDialog">Cancel</button><button class="button button-primary" type="submit" id="saveBoardButton">Create board</button></div>
+    </form>
+  </dialog>
+
+  <!-- Column create / edit -->
+  <dialog class="modal" id="columnDialog">
+    <form class="modal-panel" id="columnForm" method="dialog">
+      <div class="modal-header"><div><span class="modal-eyebrow">LIST SETTINGS</span><h2 id="columnModalTitle">Add a list</h2></div><button class="modal-close" type="button" data-close="columnDialog" aria-label="Kapat">×</button></div>
+      <input type="hidden" id="columnId">
+      <label class="form-label" for="columnTitle">List name</label>
+      <input class="form-input" id="columnTitle" maxlength="150" placeholder="e.g. To do" required>
+      <label class="form-label" for="columnDescription">Description <span>Optional</span></label>
+      <textarea class="form-input form-textarea" id="columnDescription" rows="2" placeholder="A short note about this list"></textarea>
+      <div class="column-links-editor-heading">
+        <label class="form-label" for="columnLinksEditor">Links <span>Optional · add as many as you need</span></label>
+        <button class="button button-quiet column-add-link" id="addColumnLinkButton" type="button">＋ Add link</button>
+      </div>
+      <div class="column-links-editor" id="columnLinksEditor" aria-label="List links"></div>
+      <input id="columnUrl" type="hidden">
+      <div class="form-two-col">
+        <div><label class="form-label" for="columnBoard">Belongs to</label><select class="form-input" id="columnBoard"><option value="">Independent</option></select></div>
+        <div><label class="form-label" for="columnColor">List colour</label><div class="colour-input-row compact"><input id="columnColor" type="color" value="#5b8def"><span>Accent</span></div></div>
+      </div>
+      <details class="advanced-fields"><summary>Advanced properties</summary><label class="form-label" for="columnProperties">JSON properties</label><textarea class="form-input form-textarea code-input" id="columnProperties" rows="3" spellcheck="false">{}</textarea></details>
+      <div class="modal-actions"><button class="button button-quiet" type="button" data-close="columnDialog">Cancel</button><button class="button button-primary" type="submit" id="saveColumnButton">Add list</button></div>
+    </form>
+  </dialog>
+
+  <!-- Task create / edit -->
+  <dialog class="modal task-popover-dialog" id="taskDialog">
+    <form class="modal-panel task-modal-panel" id="taskForm" method="dialog">
+      <div class="modal-header"><div><span class="modal-eyebrow" id="taskModalEyebrow">NEW TASK</span><h2 id="taskModalTitle">Add a task</h2></div><button class="modal-close" type="button" data-close="taskDialog" aria-label="Kapat">×</button></div>
+      <input type="hidden" id="taskId">
+      <label class="form-label" for="taskTitle">Task name</label>
+      <input class="form-input task-title-input" id="taskTitle" maxlength="200" placeholder="What needs to get done?" required>
+      <div class="form-two-col task-type-row"><div><label class="form-label" for="taskType">Type</label><select class="form-input" id="taskType"><option value="task">Task</option><option value="lecture">Lecture / Topic</option><option value="exam">Exam</option><option value="project">Project</option><option value="idea">Idea</option><option value="resource">Resource</option><option value="reminder">Reminder</option></select></div></div>
+      <label class="form-label" for="taskDescription">Description <span>Optional</span></label>
+      <div class="task-description-tools">
+        <span>Markdown destekli notlar</span>
+        <div class="task-code-tools">
+          <select id="taskCodeLanguage" class="form-input" aria-label="Kod dili">
+            <option value="js">JavaScript</option><option value="ts">TypeScript</option><option value="py">Python</option>
+            <option value="html">HTML</option><option value="css">CSS</option><option value="sql">SQL</option>
+            <option value="bash">Bash</option><option value="json">JSON</option><option value="csharp">C#</option>
+            <option value="text">Plain text</option>
+          </select>
+          <button class="button button-outline" id="insertCodeBlock" type="button">＋ Code block</button>
+        </div>
+      </div>
+      <textarea class="form-input form-textarea" id="taskDescription" rows="5" placeholder="Add context, notes, Markdown or code…"></textarea>
+      <div class="task-links-editor-heading">
+        <label class="form-label" for="taskLinksEditor">Links <span>Optional · add multiple references</span></label>
+        <button class="button button-quiet task-add-link" id="addTaskLinkButton" type="button">＋ Add link</button>
+      </div>
+      <div class="task-links-editor" id="taskLinksEditor" aria-label="Task links"></div>
+      <div class="form-three-col task-fields-row">
+        <div><label class="form-label" for="taskColumn">List</label><select class="form-input" id="taskColumn" required></select></div>
+        <div><label class="form-label" for="taskStatus">Status</label><select class="form-input" id="taskStatus">
+          <option value="todo">Yapılacak</option>
+          <option value="in_progress">Devam ediyor</option>
+          <option value="almost_done">Tamamlanıyor</option>
+          <option value="half_done">Yarım kaldı</option>
+          <option value="completed">Tamamlandı</option>
+          <option value="failed">Başaramadım</option>
+          <option value="on_hold">Beklemede</option>
+        </select></div>
+        <div><label class="form-label" for="taskPriority">Priority</label><select class="form-input" id="taskPriority"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></div>
+      </div>
+      <div class="form-two-col task-fields-row">
+        <div><label class="form-label" for="taskStartDate">Start date <span>Optional</span></label><input class="form-input" id="taskStartDate" type="date"></div>
+        <div><label class="form-label" for="taskDueDate">Due date <span>Optional</span></label><input class="form-input" id="taskDueDate" type="date"></div>
+      </div>
+      <label class="form-label" for="taskTags">Labels <span>Optional · comma separated</span></label>
+      <input class="form-input" id="taskTags" placeholder="backend, urgent, research">
+
+      <section class="photo-section" id="taskPhotoSection" aria-label="Task photos">
+        <div class="photo-section-heading">
+          <div><strong>Fotoğraflar</strong><span>Göreve ekli görseller</span></div>
+          <div class="photo-actions">
+            <button class="button button-quiet photo-choose-button" id="pastePhotoButton" type="button" title="Panodaki görseli yapıştır"><svg viewBox="0 0 24 24"><path d="M8 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3M9 3h6v3H9zM14 11h7m-3.5-3.5v7"/></svg>Panodan yapıştır</button>
+            <label class="button button-outline photo-choose-button" for="taskPhotosInput">＋ Fotoğraf ekle</label>
+          </div>
+          <input id="taskPhotosInput" class="visually-hidden-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" multiple>
+        </div>
+        <div class="photo-dropzone" id="photoDropzone" tabindex="0" aria-label="Fotoğraf yapıştırma ve bırakma alanı">
+          <div class="photo-grid" id="taskPhotoGrid"><p class="photo-empty">Henüz fotoğraf yok. Görseli buraya bırak veya Ctrl/⌘ + V ile yapıştır.</p></div>
+        </div>
+        <p class="photo-upload-note">JPG, PNG, WEBP, GIF veya AVIF · Her fotoğraf en fazla 10 MB</p>
+      </section>
+
+      <section class="task-extra-panel" id="subtasksPanel" hidden><div class="extra-panel-head"><strong>Subtasks</strong><span id="subtaskProgress">0 / 0</span></div><div id="subtaskList" class="subtask-list"></div><div class="inline-add-row"><input class="form-input" id="newSubtaskTitle" placeholder="Add a step…"><button class="button button-outline" id="addSubtaskButton" type="button">Add</button></div></section>
+      <section class="task-extra-panel" id="relationsPanel" hidden><div class="extra-panel-head"><strong>Related items</strong><span id="relationCount">0</span></div><div id="relationList" class="relation-list"></div><div class="inline-add-row"><select class="form-input" id="relatedItemSelect"><option value="">Choose an item…</option></select><button class="button button-outline" id="addRelationButton" type="button">Link</button></div></section>
+      <details class="advanced-fields"><summary>Custom values (JSON)</summary><textarea class="form-input form-textarea code-input" id="taskCustomValues" rows="3" spellcheck="false">{}</textarea></details>
+      <div class="modal-actions task-modal-actions"><button class="button button-quiet" id="archiveTaskButton" type="button" hidden>Archive</button><button class="button button-danger-quiet" id="deleteTaskButton" type="button" hidden>Delete task</button><span class="modal-actions-spacer"></span><button class="button button-quiet" type="button" data-close="taskDialog">Cancel</button><button class="button button-primary" type="submit" id="saveTaskButton">Add task</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal quick-capture-dialog" id="quickCaptureDialog">
+    <form class="modal-panel quick-capture-panel" id="quickCaptureForm" method="dialog">
+      <div class="modal-header"><div><span class="modal-eyebrow">QUICK CAPTURE</span><h2>Aklına geleni yakala</h2></div><button class="modal-close" type="button" data-close="quickCaptureDialog">×</button></div>
+      <label class="form-label" for="quickCaptureText">Fikir veya görev</label>
+      <textarea class="form-input form-textarea" id="quickCaptureText" rows="3" placeholder="Şimdi aklına ne geldi?" required></textarea>
+      <p class="quick-capture-hint">Ctrl + Space ile her yerden açabilirsin. Kaydedilen kayıt Inbox'a gider.</p>
+      <div class="modal-actions"><span class="modal-actions-spacer"></span><button class="button button-quiet" type="button" data-close="quickCaptureDialog">Vazgeç</button><button class="button button-primary" type="submit">Inbox'a kaydet ↵</button></div>
+    </form>
+  </dialog>
+
+  <div class="status-picker" id="statusPicker" hidden role="menu" aria-label="Change task status"></div>
+
+  <div class="walkthrough-layer" id="walkthroughLayer" hidden>
+    <div class="walkthrough-spotlight" id="walkthroughSpotlight"></div>
+    <section class="walkthrough-card" id="walkthroughCard" role="dialog" aria-modal="true" aria-labelledby="walkthroughTitle">
+      <div class="walkthrough-progress"><span id="walkthroughStepLabel">01 / 06</span><div><i id="walkthroughProgress"></i></div><button type="button" id="walkthroughSkip">Skip</button></div>
+      <span class="walkthrough-kicker" id="walkthroughKicker">WORKBOARD TOUR</span>
+      <h2 id="walkthroughTitle">Knowledge map</h2>
+      <p id="walkthroughText"></p>
+      <div class="walkthrough-actions"><button class="button button-quiet" id="walkthroughBack" type="button">Back</button><span></span><button class="button button-primary" id="walkthroughNext" type="button">Next</button></div>
+    </section>
+  </div>
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

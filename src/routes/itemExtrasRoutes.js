@@ -1,0 +1,12 @@
+const express = require('express');
+const router = express.Router();
+const c = require('../controllers/itemExtrasController');
+router.get('/review/weekly', c.weeklyReview);
+router.get('/:id/subtasks', c.getSubtasks);
+router.post('/:id/subtasks', c.createSubtask);
+router.patch('/:id/subtasks/:subtaskId', c.updateSubtask);
+router.delete('/:id/subtasks/:subtaskId', c.deleteSubtask);
+router.get('/:id/relations', c.getRelations);
+router.post('/:id/relations', c.createRelation);
+router.delete('/:id/relations/:relationId', c.deleteRelation);
+module.exports = router;

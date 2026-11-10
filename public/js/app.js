@@ -1,0 +1,1904 @@
+(() => {
+  "use strict";
+
+  const API = "/api";
+  const STATUS_PRESETS = [
+    { value: "todo", label: "Yapılacak", symbol: "○" },
+    { value: "in_progress", label: "Devam ediyor", symbol: "◔" },
+    { value: "almost_done", label: "Tamamlanıyor", symbol: "◕" },
+    { value: "half_done", label: "Yarım kaldı", symbol: "◑" },
+    { value: "completed", label: "Tamamlandı", symbol: "✓" },
+    { value: "failed", label: "Başaramadım", symbol: "×" },
+    { value: "on_hold", label: "Beklemede", symbol: "Ⅱ" }
+  ];
+  const state = {
+    boards: [],
+    boardLinks: [],
+    columns: [],
+    items: [],
+    taskPhotos: [],
+    pendingPhotos: [],
+    mode: "independent",
+    view: null,
+    currentBoardId: null,
+    collapsed: new Set(),
+    draggedItemId: null,
+    linkPreviewCache: new Map(),
+    linkPreviewInFlight: new Map(),
+    loading: false
+  };
+
+  const $ = (selector) => document.querySelector(selector);
+  const els = {
+    boardList: $("#boardList"), independentNav: $("#independentNav"), independentCount: $("#independentCount"),
+    inboxCount: $("#inboxCount"), todayCount: $("#todayCount"),
+    connectionDot: $("#connectionDot"), connectionText: $("#connectionText"), breadcrumbs: $("#breadcrumbs"),
+    pageEyebrow: $("#pageEyebrow"), pageTitle: $("#pageTitle"), pageDescription: $("#pageDescription"),
+    boardEditButton: $("#boardEditButton"), newColumnButton: $("#newColumnButton"), newTaskButton: $("#newTaskButton"),
+    boardReferenceLinks: $("#boardReferenceLinks"),
+    boardCount: $("#boardCount"), columnsBoard: $("#columnsBoard"),
+    searchInput: $("#searchInput"), priorityFilter: $("#priorityFilter"), lastUpdated: $("#lastUpdated"),
+    boardDialog: $("#boardDialog"), boardForm: $("#boardForm"), boardId: $("#boardId"),
+    boardTitle: $("#boardTitle"), boardDescription: $("#boardDescription"), boardUrl: $("#boardUrl"),
+    boardLinksEditor: $("#boardLinksEditor"), addBoardLinkButton: $("#addBoardLinkButton"),
+    boardColor: $("#boardColor"), boardModalTitle: $("#boardModalTitle"), saveBoardButton: $("#saveBoardButton"), deleteBoardButton: $("#deleteBoardButton"),
+    columnDialog: $("#columnDialog"), columnForm: $("#columnForm"), columnId: $("#columnId"),
+    columnTitle: $("#columnTitle"), columnDescription: $("#columnDescription"), columnUrl: $("#columnUrl"),
+    columnLinksEditor: $("#columnLinksEditor"), addColumnLinkButton: $("#addColumnLinkButton"),
+    columnColor: $("#columnColor"), columnBoard: $("#columnBoard"), columnProperties: $("#columnProperties"),
+    columnModalTitle: $("#columnModalTitle"), saveColumnButton: $("#saveColumnButton"),
+    taskDialog: $("#taskDialog"), taskForm: $("#taskForm"), taskId: $("#taskId"),
+    taskTitle: $("#taskTitle"), taskDescription: $("#taskDescription"), taskLinksEditor: $("#taskLinksEditor"), addTaskLinkButton: $("#addTaskLinkButton"), taskColumn: $("#taskColumn"),
+    taskPriority: $("#taskPriority"), taskStatus: $("#taskStatus"), taskStartDate: $("#taskStartDate"), taskDueDate: $("#taskDueDate"),
+    taskTags: $("#taskTags"), taskCustomValues: $("#taskCustomValues"), taskPhotosInput: $("#taskPhotosInput"), taskPhotoGrid: $("#taskPhotoGrid"),
+    statusPicker: $("#statusPicker"), taskModalTitle: $("#taskModalTitle"),
+    taskModalEyebrow: $("#taskModalEyebrow"), saveTaskButton: $("#saveTaskButton"), deleteTaskButton: $("#deleteTaskButton"), archiveTaskButton: $("#archiveTaskButton"),
+    toastRegion: $("#toastRegion"), clipboardTaskButton: $("#clipboardTaskButton"),
+    pastePhotoButton: $("#pastePhotoButton"), photoDropzone: $("#photoDropzone"),
+    taskType: $("#taskType"), subtasksPanel: $("#subtasksPanel"), subtaskList: $("#subtaskList"),
+    subtaskProgress: $("#subtaskProgress"), newSubtaskTitle: $("#newSubtaskTitle"), addSubtaskButton: $("#addSubtaskButton"),
+    relationsPanel: $("#relationsPanel"), relationList: $("#relationList"), relationCount: $("#relationCount"),
+    relatedItemSelect: $("#relatedItemSelect"), addRelationButton: $("#addRelationButton")
+  };
+
+  async function api(path, options = {}) {
+    const config = {
+      method: options.method || "GET",
+      headers: { Accept: "application/json", ...(options.headers || {}) }
+    };
+    if (options.body !== undefined) {
+      config.headers["Content-Type"] = "application/json";
+      config.body = JSON.stringify(options.body);
+    }
+
+    let response;
+    try {
+      response = await fetch(`${API}${path}`, config);
+    } catch {
+      throw new Error("Sunucuya ulaşılamadı. Express uygulamasının çalıştığını kontrol et.");
+    }
+
+    const raw = await response.text();
+    let data = null;
+    if (raw) {
+      try { data = JSON.parse(raw); }
+      catch { data = { message: raw }; }
+    }
+
+    if (!response.ok) {
+      const detail = data?.error ? ` — ${data.error}` : "";
+      throw new Error((data?.message || `İstek başarısız (${response.status})`) + detail);
+    }
+    return data;
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    })[char]);
+  }
+
+  function safeUrl(value) {
+    if (!value) return null;
+    try {
+      const url = new URL(value);
+      return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+    } catch { return null; }
+  }
+
+  function toast(message, type = "success") {
+    const node = document.createElement("div");
+    node.className = `toast ${type === "error" ? "error" : ""}`;
+    node.innerHTML = `<span class="toast-mark">${type === "error" ? "!" : "✓"}</span><span>${escapeHtml(message)}</span>`;
+    els.toastRegion.appendChild(node);
+    window.setTimeout(() => node.remove(), 3500);
+  }
+
+  function clipboardHtmlToText(html) {
+    if (!html) return "";
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    doc.querySelectorAll("script, style, iframe, object, noscript").forEach((node) => node.remove());
+    const text = (doc.body?.innerText || doc.body?.textContent || "").replace(/\u00a0/g, " ");
+    return text.trim();
+  }
+
+  function normaliseClipboardText(value) {
+    return String(value || "").replace(/\r\n?/g, "\n").replace(/\u0000/g, "").trim();
+  }
+
+  function clipboardTextFromData(data) {
+    if (!data) return "";
+    const plain = normaliseClipboardText(data.getData("text/plain"));
+    if (plain) return plain;
+    const html = data.getData("text/html");
+    if (html) return normaliseClipboardText(clipboardHtmlToText(html));
+    return normaliseClipboardText(data.getData("text/uri-list"));
+  }
+
+  function uniqueFiles(files) {
+    const seen = new Set();
+    return Array.from(files || []).filter((file) => {
+      if (!file || !file.type?.startsWith("image/")) return false;
+      const key = `${file.name || "image"}:${file.size}:${file.type}:${file.lastModified || 0}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function clipboardFilesFromData(data) {
+    if (!data) return [];
+    const files = [];
+    if (data.items) {
+      for (const item of Array.from(data.items)) {
+        if (item.kind !== "file" || !item.type?.startsWith("image/")) continue;
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (data.files) files.push(...Array.from(data.files));
+    return uniqueFiles(files);
+  }
+
+  function extensionForImageType(type) {
+    return ({
+      "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
+      "image/gif": "gif", "image/avif": "avif"
+    })[type] || "png";
+  }
+
+  async function readClipboardPayload() {
+    if (!navigator.clipboard) throw new Error("Tarayıcı panoya erişim izni vermedi. Ctrl/⌘ + V kullanabilirsin.");
+
+    if (typeof navigator.clipboard.read === "function") {
+      try {
+        const clipboardItems = await navigator.clipboard.read();
+        let text = "";
+        const files = [];
+        for (const item of clipboardItems) {
+          if (!text && item.types.includes("text/plain")) {
+            text = normaliseClipboardText(await (await item.getType("text/plain")).text());
+          }
+          if (!text && item.types.includes("text/html")) {
+            text = normaliseClipboardText(clipboardHtmlToText(await (await item.getType("text/html")).text()));
+          }
+          if (!text && item.types.includes("text/uri-list")) {
+            text = normaliseClipboardText(await (await item.getType("text/uri-list")).text());
+          }
+          for (const type of item.types.filter((entry) => entry.startsWith("image/"))) {
+            const blob = await item.getType(type);
+            const mime = blob.type || type;
+            const file = new File([blob], `clipboard-${Date.now()}-${files.length + 1}.${extensionForImageType(mime)}`, {
+              type: mime, lastModified: Date.now()
+            });
+            files.push(file);
+          }
+        }
+        return { text, files: uniqueFiles(files) };
+      } catch (error) {
+        // Firefox and some browser profiles may allow readText but deny read().
+        if (typeof navigator.clipboard.readText !== "function") throw error;
+      }
+    }
+
+    if (typeof navigator.clipboard.readText === "function") {
+      return { text: normaliseClipboardText(await navigator.clipboard.readText()), files: [] };
+    }
+    throw new Error("Panoya erişilemiyor. İçeriği seçip Ctrl/⌘ + V ile yapıştır.");
+  }
+
+  function parseClipboardTaskText(text, files = []) {
+    const cleaned = normaliseClipboardText(text);
+    const lines = cleaned.split("\n");
+    const firstLine = (lines.shift() || "").trim();
+    let title = firstLine;
+    let description = lines.join("\n").trim();
+
+    if (title && safeUrl(title) && !description) {
+      const url = new URL(title);
+      title = `Bağlantı: ${url.hostname}`;
+      description = cleaned;
+    }
+    if (!title && files.length) {
+      title = files.length === 1 ? "Panodan eklenen görsel" : `${files.length} görsel içeren görev`;
+    }
+    if (!title) title = "Panodan eklenen görev";
+
+    if (title.length > 200) {
+      description = `${title.slice(200)}\n${description}`.trim();
+      title = title.slice(0, 200);
+    }
+    return { title, description };
+  }
+
+  function isEditableTarget(target) {
+    return Boolean(target?.closest?.('input:not([type="button"]):not([type="submit"]):not([type="file"]), textarea, select, [contenteditable="true"]'));
+  }
+
+  function appendTextToTaskDescription(text) {
+    const value = normaliseClipboardText(text);
+    if (!value) return;
+    const current = els.taskDescription.value.trim();
+    els.taskDescription.value = current ? `${els.taskDescription.value.replace(/\s+$/, "")}\n\n${value}` : value;
+    els.taskDescription.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function insertClipboardText(target, text) {
+    const value = normaliseClipboardText(text);
+    if (!value) return;
+    const editable = target?.closest?.('input:not([type="button"]):not([type="submit"]):not([type="file"]), textarea');
+    if (editable && els.taskDialog.contains(editable)) {
+      const start = Number.isInteger(editable.selectionStart) ? editable.selectionStart : editable.value.length;
+      const end = Number.isInteger(editable.selectionEnd) ? editable.selectionEnd : editable.value.length;
+      editable.setRangeText(value, start, end, "end");
+      editable.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+    appendTextToTaskDescription(value);
+  }
+
+  async function createTaskFromClipboard(payload, preferredColumnId = null) {
+    const text = normaliseClipboardText(payload?.text);
+    const files = uniqueFiles(payload?.files || []);
+    if (!text && !files.length) {
+      toast("Panoda görev oluşturulabilecek metin veya görsel bulunamadı.", "error");
+      return;
+    }
+    if (!state.columns.length && state.view !== "inbox") {
+      toast("Önce bir liste oluştur.", "error");
+      openColumnDialog();
+      return;
+    }
+    const parsed = parseClipboardTaskText(text, files);
+    openTaskDialog(null, preferredColumnId);
+    els.taskTitle.value = parsed.title;
+    els.taskDescription.value = parsed.description;
+    if (files.length) await handlePhotoSelection(files);
+    els.taskTitle.focus();
+    els.taskTitle.select();
+    toast(files.length ? `Görev taslağı hazır · ${files.length} görsel eklendi.` : "Metin yeni görev taslağına aktarıldı.");
+  }
+
+  async function pasteFromClipboardToBoard() {
+    try {
+      const payload = await readClipboardPayload();
+      await createTaskFromClipboard(payload);
+    } catch (error) {
+      toast(error.message || "Panoya erişilemedi. Board üzerinde Ctrl/⌘ + V kullan.", "error");
+    }
+  }
+
+  async function pasteFromClipboardToTask() {
+    if (!els.taskDialog.open) return;
+    try {
+      const payload = await readClipboardPayload();
+      const files = uniqueFiles(payload.files || []);
+      if (files.length) await handlePhotoSelection(files);
+      if (payload.text) appendTextToTaskDescription(payload.text);
+      if (!files.length && !payload.text) toast("Panoda yapıştırılabilecek içerik yok.", "error");
+      else if (files.length && payload.text) toast("Metin ve görseller göreve eklendi.");
+      else if (files.length) toast(`${files.length} görsel göreve eklendi.`);
+      else toast("Metin açıklamaya eklendi.");
+    } catch (error) {
+      toast(error.message || "Panoya erişilemedi. Fotoğraf alanına Ctrl/⌘ + V yapıştır.", "error");
+    }
+  }
+
+  function handleDocumentPaste(event) {
+    const data = event.clipboardData;
+    if (!data) return;
+    const text = clipboardTextFromData(data);
+    const files = clipboardFilesFromData(data);
+    const taskOpen = els.taskDialog.open;
+    const otherDialogOpen = els.boardDialog.open || els.columnDialog.open;
+
+    if (taskOpen) {
+      if (files.length) {
+        event.preventDefault();
+        handlePhotoSelection(files);
+        if (text) insertClipboardText(event.target, text);
+        return;
+      }
+      if (text && !isEditableTarget(event.target)) {
+        event.preventDefault();
+        insertClipboardText(event.target, text);
+        toast("Panodaki metin görev açıklamasına eklendi.");
+      }
+      return;
+    }
+
+    if (otherDialogOpen || isEditableTarget(event.target)) return;
+    if (text || files.length) {
+      event.preventDefault();
+      createTaskFromClipboard({ text, files });
+    }
+  }
+
+  function setConnection(online, message) {
+    if (els.connectionDot) els.connectionDot.className = `status-dot ${online ? "online" : "offline"}`;
+    if (els.connectionText) els.connectionText.textContent = message;
+  }
+
+  function selectedBoard() {
+    return state.boards.find((board) => board.id === state.currentBoardId) || null;
+  }
+
+  function currentItemsCount() { return state.items.length; }
+
+  function boardReferenceUrls(board) {
+    const links = [];
+    const seen = new Set();
+    const add = (raw, label = "") => {
+      const url = safeUrl(String(raw || "").trim());
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      const parsed = new URL(url);
+      links.push({ url, label: String(label || parsed.hostname).slice(0, 70) });
+    };
+    if (state.mode === "board" && board?.id === state.currentBoardId && state.boardLinks.length) {
+      state.boardLinks.forEach((entry) => add(entry.url, entry.title));
+    } else {
+      // Backward compatibility for boards created before the multi-link editor.
+      add(board?.url, "Board link");
+      const matches = String(board?.description || "").match(/https?:\/\/[^\s<>\"'`]+/gi) || [];
+      matches.forEach((url) => add(url.replace(/[),.;!?\]]+$/g, "")));
+      const extraLinks = board?.properties?.links;
+      if (Array.isArray(extraLinks)) extraLinks.forEach((entry) => add(typeof entry === "string" ? entry : entry?.url || entry?.href, entry?.label || entry?.title));
+    }
+    return links.slice(0, 20);
+  }
+
+  function boardDescriptionText(board) {
+    return String(board?.description || "")
+      .replace(/https?:\/\/[^\s<>"'`]+/gi, "")
+      .replace(/\s+([,.;!?])/g, "$1")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  function renderBoardReferenceLink(link) {
+    const host = new URL(link.url).hostname;
+    return `
+      <a class="board-reference-card" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer" data-link-preview data-link-url="${escapeHtml(link.url)}" title="${escapeHtml(link.url)}">
+        <span class="board-reference-icon"><img data-link-favicon alt="" hidden><span class="link-favicon-fallback">↗</span></span>
+        <span class="board-reference-copy">
+          <strong data-link-title>${escapeHtml(link.label || host)}</strong>
+          <span class="board-reference-host">${escapeHtml(host)}</span>
+          <span class="link-request-state state-checking" data-link-state>Checking response…</span>
+        </span>
+        <img class="board-reference-cover" data-link-cover alt="" hidden loading="lazy">
+        <svg class="board-reference-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg>
+      </a>`;
+  }
+
+  function renderSidebar() {
+    const isIndependent = state.mode === "independent";
+    els.independentNav.classList.toggle("active", isIndependent && !state.view);
+    els.independentCount.textContent = String(state.columns.filter((column) => column.board_id == null).length);
+    if (els.inboxCount) els.inboxCount.textContent = state.view === "inbox" ? String(state.items.filter(item => item.is_inbox).length) : "";
+    if (els.todayCount) els.todayCount.textContent = state.view === "today" ? String(state.items.length) : "";
+    document.querySelectorAll("[data-view]").forEach(button => button.classList.toggle("active", state.view === button.dataset.view));
+    if (!state.boards.length) {
+      els.boardList.innerHTML = `<div class="sidebar-loading">No boards yet</div>`;
+      return;
+    }
+    els.boardList.innerHTML = state.boards.map((board) => `
+      <button class="board-link ${state.mode === "board" && state.currentBoardId === board.id ? "active" : ""}" type="button" data-board-id="${escapeHtml(board.id)}" title="${escapeHtml(board.title)}">
+        <span class="board-color" style="background:${escapeHtml(board.color || "#5793f7")}"></span>
+        <span>${escapeHtml(board.title)}</span>
+        <svg class="board-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+      </button>`).join("");
+  }
+
+  function renderHeader() {
+    const board = selectedBoard();
+    const viewTitles = { inbox: "Inbox", today: "Today", upcoming: "Upcoming", completed: "Completed", weekly: "Weekly review", archive: "Archive" };
+    if (state.view) {
+      const title = viewTitles[state.view] || "Tasks";
+      els.breadcrumbs.innerHTML = `<strong>${escapeHtml(title)}</strong>`;
+      els.pageEyebrow.textContent = "";
+      els.pageTitle.textContent = title;
+      els.pageDescription.hidden = false;
+      els.pageDescription.textContent = ({ inbox: "Capture first. Organise later.", today: "What needs your attention today.", upcoming: "Tasks with a future due date.", completed: "Work you have finished.", weekly: "A quick look at completed and overdue work.", archive: "Keep old work out of the way." })[state.view];
+      if (els.boardReferenceLinks) { els.boardReferenceLinks.hidden = true; els.boardReferenceLinks.innerHTML = ""; }
+      els.boardEditButton.hidden = true;
+      els.newColumnButton.hidden = true;
+    } else if (state.mode === "board" && board) {
+      els.breadcrumbs.innerHTML = `<span>Boards</span><span class="crumb-slash">/</span><strong>${escapeHtml(board.title)}</strong>`;
+      els.pageEyebrow.textContent = "";
+      els.pageTitle.textContent = board.title;
+      const cleanDescription = boardDescriptionText(board);
+      els.pageDescription.textContent = cleanDescription;
+      els.pageDescription.hidden = !cleanDescription;
+      const boardLinks = boardReferenceUrls(board);
+      if (els.boardReferenceLinks) {
+        els.boardReferenceLinks.innerHTML = boardLinks.map(renderBoardReferenceLink).join("");
+        els.boardReferenceLinks.hidden = boardLinks.length === 0;
+        if (boardLinks.length) hydrateLinkPreviews();
+      }
+      els.boardEditButton.hidden = false;
+      els.newColumnButton.hidden = false;
+    } else {
+      els.breadcrumbs.innerHTML = `<strong>Independent lists</strong>`;
+      els.pageEyebrow.textContent = "";
+      els.pageTitle.textContent = "Loose lists";
+      els.pageDescription.textContent = "";
+      els.pageDescription.hidden = true;
+      if (els.boardReferenceLinks) { els.boardReferenceLinks.hidden = true; els.boardReferenceLinks.innerHTML = ""; }
+      els.boardEditButton.hidden = true;
+      els.newColumnButton.hidden = false;
+    }
+    const listLabel = state.columns.length === 1 ? "list" : "lists";
+    const taskLabel = currentItemsCount() === 1 ? "task" : "tasks";
+    els.boardCount.textContent = state.view ? `${currentItemsCount()} ${taskLabel}` : `${state.columns.length} ${listLabel} · ${currentItemsCount()} ${taskLabel}`;
+    els.newTaskButton.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>${state.view === "inbox" ? "Quick capture" : "Add task"}</span>`;
+  }
+
+  function formatDate(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("tr-TR", { day: "numeric", month: "short" }).format(date);
+  }
+
+  function isOverdue(value) {
+    if (!value) return false;
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    d.setHours(0, 0, 0, 0);
+    return d < today;
+  }
+
+  function priorityLabel(priority) {
+    return ({ low: "Low", normal: "Normal", high: "High", urgent: "Urgent" })[priority] || "Normal";
+  }
+
+  function statusPreset(value) {
+    const normalized = value === "done" ? "completed" : (value || "todo");
+    return STATUS_PRESETS.find((preset) => preset.value === normalized) || STATUS_PRESETS[0];
+  }
+
+  function safePhotoUrl(value) {
+    return typeof value === "string" && /^\/uploads\/items\/[a-f0-9-]+\.(?:jpg|png|webp|gif|avif)$/i.test(value) ? value : null;
+  }
+
+  function checkState(value) {
+    return ["empty", "checked", "partial"].includes(value) ? value : "empty";
+  }
+
+  function checkStateLabel(value) {
+    return ({ empty: "Boş", checked: "Tamamlandı", partial: "Kısmen tamamlandı" })[checkState(value)];
+  }
+
+  function contentSectionCollapsed(task, section, defaultCollapsed = false) {
+    const saved = task.content_state?.collapsed_sections;
+    return saved && Object.prototype.hasOwnProperty.call(saved, section)
+      ? Boolean(saved[section])
+      : defaultCollapsed;
+  }
+
+  function renderContentSection(task, section, title, count, body, defaultCollapsed = false) {
+    const collapsed = contentSectionCollapsed(task, section, defaultCollapsed);
+    return `
+      <section class="task-content-section ${collapsed ? "is-collapsed" : ""}" data-content-section="${escapeHtml(section)}">
+        <button class="task-content-toggle" type="button" data-item-section-toggle data-card-action data-task-id="${escapeHtml(task.id)}" data-section="${escapeHtml(section)}" aria-expanded="${collapsed ? "false" : "true"}">
+          <span class="task-content-toggle-title">${escapeHtml(title)}</span>
+          <span class="task-content-toggle-count">${escapeHtml(count)}</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="task-content-body">${body}</div>
+      </section>`;
+  }
+
+  function collectItemLinks(task) {
+    const links = [];
+    const seen = new Set();
+    const add = (candidate, label = "") => {
+      const raw = typeof candidate === "string" ? candidate : candidate?.url || candidate?.href;
+      const url = safeUrl(String(raw || "").trim());
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      const parsed = new URL(url);
+      links.push({ url, label: String(candidate?.label || candidate?.title || label || parsed.hostname).slice(0, 90) });
+    };
+    const visit = (value, key = "") => {
+      if (!value) return;
+      if (typeof value === "string") {
+        const matches = value.match(/https?:\/\/[^\s<>"'`]+/gi) || [];
+        matches.forEach((match) => add(match.replace(/[),.;!?\]]+$/g, ""), key));
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((entry) => {
+          if (entry && typeof entry === "object" && (entry.url || entry.href)) add(entry, key);
+          else visit(entry, key);
+        });
+        return;
+      }
+      if (typeof value === "object") {
+        if (value.url || value.href) add(value, value.label || value.title || key);
+        else Object.entries(value).forEach(([childKey, child]) => visit(child, childKey));
+      }
+    };
+
+    visit(task.url, "Link");
+    visit(task.description, "Description link");
+    visit(task.custom_values?.links, "Link");
+    visit(task.properties?.links, "Link");
+    visit(Object.fromEntries(Object.entries(task.custom_values || {}).filter(([key]) => !["tags", "links"].includes(key))), "Detail");
+    visit(Object.fromEntries(Object.entries(task.properties || {}).filter(([key]) => key !== "links")), "Property");
+    return links;
+  }
+
+  function renderLinkPreview(link) {
+    const host = new URL(link.url).hostname;
+    return `
+      <a class="task-link-preview" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer" data-link-preview data-link-url="${escapeHtml(link.url)}">
+        <span class="link-preview-favicon-wrap"><img data-link-favicon alt="" hidden><span class="link-favicon-fallback">↗</span></span>
+        <span class="link-preview-copy">
+          <strong data-link-title>${escapeHtml(link.label || host)}</strong>
+          <span class="link-preview-host">${escapeHtml(host)}</span>
+          <span class="link-request-state state-checking" data-link-state>Checking access…</span>
+          <span class="link-preview-description" data-link-description hidden></span>
+        </span>
+        <img class="link-preview-cover" data-link-cover alt="" hidden loading="lazy">
+        <svg class="link-preview-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg>
+      </a>`;
+  }
+
+  function renderItemDetails(task) {
+    const custom = { ...(task.custom_values || {}) };
+    delete custom.tags;
+    delete custom.links;
+    const properties = { ...(task.properties || {}) };
+    delete properties.links;
+    const detailData = {};
+    if (Object.keys(custom).length) detailData["Custom fields"] = custom;
+    if (Object.keys(properties).length) detailData["Properties"] = properties;
+    if (!Object.keys(detailData).length) return "";
+    const json = JSON.stringify(detailData, null, 2);
+    return renderContentSection(
+      task,
+      "details",
+      "Details & data",
+      `${Object.keys(detailData).length} section${Object.keys(detailData).length === 1 ? "" : "s"}`,
+      `<pre class="task-json-preview"><code>${escapeHtml(json)}</code></pre>`,
+      true
+    );
+  }
+
+  function renderTask(task, index) {
+    const tags = Array.isArray(task.custom_values?.tags) ? task.custom_values.tags : [];
+    const safeTags = tags.filter((tag) => typeof tag === "string" && tag.trim()).slice(0, 4);
+    const due = formatDate(task.due_date);
+    const dueClass = isOverdue(task.due_date) ? "overdue" : "";
+    const description = task.description ? `<p class="task-description">${escapeHtml(task.description)}</p>` : "";
+    const labels = safeTags.length ? `<div class="task-labels">${safeTags.map((tag, i) => `<span class="task-label ${["", "label-green", "label-amber", "label-purple", "label-red"][i % 5]}">${escapeHtml(tag)}</span>`).join("")}</div>` : "";
+    const dueHtml = due ? `<span class="due-date ${dueClass}" title="Due ${escapeHtml(due)}"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M7.5 3v4M16.5 3v4M3.5 10h17"/></svg>${escapeHtml(due)}</span>` : "";
+    const preset = statusPreset(task.status);
+    const typeLabels = { task: "Task", lecture: "Lecture", exam: "Exam", project: "Project", idea: "Idea", resource: "Resource", reminder: "Reminder" };
+    const typeLabel = typeLabels[task.item_type || "task"] || "Task";
+    const subtaskMeta = Number(task.subtasks_total || 0) ? `<span class="subtask-meta" title="Subtasks">☷ ${Number(task.subtasks_done || 0)}/${Number(task.subtasks_total || 0)}</span>` : "";
+    const mark = checkState(task.check_state);
+    const photos = Array.isArray(task.photos) ? task.photos.filter((photo) => safePhotoUrl(photo.url)) : [];
+    const visiblePhotos = photos.slice(0, 4);
+    const photoBody = visiblePhotos.length ? `
+      <div class="task-inline-photo-grid">
+        ${visiblePhotos.map((photo) => `<a class="task-inline-photo" href="${escapeHtml(safePhotoUrl(photo.url))}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(photo.original_name || "Fotoğrafı aç")}"><img src="${escapeHtml(safePhotoUrl(photo.url))}" alt="${escapeHtml(photo.original_name || "Task photo")}" loading="lazy"></a>`).join("")}
+        ${photos.length > visiblePhotos.length ? `<span class="task-photo-more">+${photos.length - visiblePhotos.length}</span>` : ""}
+      </div>` : "";
+    const photoSection = photos.length ? renderContentSection(task, "photos", "Photos", `${photos.length}`, photoBody) : "";
+    const links = collectItemLinks(task);
+    const linkSection = links.length ? renderContentSection(task, "links", "Links", `${links.length}`, `<div class="task-link-list">${links.map(renderLinkPreview).join("")}</div>`) : "";
+    const detailsSection = renderItemDetails(task);
+    const content = photoSection || linkSection || detailsSection
+      ? `<div class="task-content-stack">${photoSection}${linkSection}${detailsSection}</div>`
+      : "";
+    return `
+      <article class="task-card ${task.is_pinned ? "is-pinned" : ""} ${preset.value === "completed" ? "is-done" : ""} ${mark === "checked" ? "has-check-done" : ""}" data-task-id="${escapeHtml(task.id)}" draggable="true" style="animation-delay:${Math.min(index * 25, 150)}ms" tabindex="0" role="button" aria-label="${escapeHtml(task.title)} düzenle">
+        <div class="task-heading">
+          <button class="task-check task-check-${mark}" type="button" data-check-toggle data-card-action data-task-id="${escapeHtml(task.id)}" role="checkbox" aria-checked="${mark === "partial" ? "mixed" : mark === "checked" ? "true" : "false"}" aria-label="${checkStateLabel(mark)}. Tıklayarak sonraki duruma geç" title="${checkStateLabel(mark)} · tıkla değiştir">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+          </button>
+          <h3 class="task-title">${escapeHtml(task.title)}</h3>
+          <button class="task-pin-button ${task.is_pinned ? "is-pinned" : ""}" type="button" data-pin-toggle data-card-action data-task-id="${escapeHtml(task.id)}" aria-pressed="${Boolean(task.is_pinned)}" title="${task.is_pinned ? "Unpin task" : "Pin task to top"}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-4 1-4 4 2 5-2 2-4-7-6-1 2-2 5 1 4-4z"/></svg></button>
+          <span class="item-type-badge type-${escapeHtml(task.item_type || "task")}">${typeLabel}</span>
+        </div>
+        ${description}
+        ${labels}
+        ${content}
+        <div class="task-footer">
+          <button class="task-status-pill status-${preset.value}" type="button" data-status-trigger data-card-action aria-label="Durum: ${escapeHtml(preset.label)}. Durumu değiştir">
+            <span class="status-indicator"></span><span>${escapeHtml(preset.label)}</span><svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>
+          </button>
+          <div class="task-meta">
+            <span class="priority-mark priority-${escapeHtml(task.priority || "normal")}">${priorityLabel(task.priority)}</span>
+            ${subtaskMeta}
+            ${photos.length ? `<span class="task-photo-count" title="${photos.length} photo(s)"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m21 15-5-5L5 20"/></svg>${photos.length}</span>` : ""}
+            ${dueHtml}
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  function getFilteredItems(columnId) {
+    const search = els.searchInput.value.trim().toLocaleLowerCase("tr-TR");
+    const priority = els.priorityFilter.value;
+    return state.items
+      .filter((item) => item.column_id === columnId)
+      .filter((item) => priority === "all" || item.priority === priority)
+      .filter((item) => !search || `${item.title || ""} ${item.description || ""} ${(item.custom_values?.tags || []).join(" ")}`.toLocaleLowerCase("tr-TR").includes(search))
+      .sort((a, b) => Number(Boolean(b.is_pinned)) - Number(Boolean(a.is_pinned)) || Number(a.position || 0) - Number(b.position || 0));
+  }
+
+  async function getLinkPreview(url) {
+    if (state.linkPreviewCache.has(url)) return state.linkPreviewCache.get(url);
+    if (state.linkPreviewInFlight.has(url)) return state.linkPreviewInFlight.get(url);
+    const promise = api(`/link-preview?url=${encodeURIComponent(url)}`)
+      .then((data) => {
+        state.linkPreviewCache.set(url, data);
+        return data;
+      })
+      .finally(() => state.linkPreviewInFlight.delete(url));
+    state.linkPreviewInFlight.set(url, promise);
+    return promise;
+  }
+
+  function linkStatusLabel(preview) {
+    const labels = {
+      public: `Accessible · ${preview.http_status || "OK"}`,
+      auth_required: `Auth required · ${preview.http_status || "login"}`,
+      restricted: `Restricted · ${preview.http_status || 403}`,
+      rate_limited: `Rate limited · ${preview.http_status || 429}`,
+      timeout: "Timed out",
+      unavailable: `Unavailable${preview.http_status ? ` · ${preview.http_status}` : ""}`
+    };
+    return labels[preview.status] || "Status unknown";
+  }
+
+  function applyLinkPreview(element, preview) {
+    if (!element?.isConnected) return;
+    const title = element.querySelector("[data-link-title]");
+    const stateLabel = element.querySelector("[data-link-state]");
+    const description = element.querySelector("[data-link-description]");
+    const favicon = element.querySelector("[data-link-favicon]");
+    const fallback = element.querySelector(".link-favicon-fallback");
+    const cover = element.querySelector("[data-link-cover]");
+    if (title && preview.title) title.textContent = preview.title;
+    if (stateLabel) {
+      stateLabel.textContent = linkStatusLabel(preview);
+      stateLabel.className = `link-request-state state-${preview.status || "unavailable"}`;
+    }
+    if (description && preview.description) {
+      description.textContent = preview.description;
+      description.hidden = false;
+    }
+    if (favicon && preview.favicon_url) {
+      favicon.src = preview.favicon_url;
+      favicon.hidden = false;
+      favicon.onerror = () => { favicon.hidden = true; if (fallback) fallback.hidden = false; };
+      if (fallback) fallback.hidden = true;
+    }
+    if (cover && preview.image_url) {
+      cover.src = preview.image_url;
+      cover.hidden = false;
+      cover.onerror = () => { cover.hidden = true; };
+    }
+    if (preview.url) element.href = preview.url;
+    element.dataset.previewLoaded = "true";
+  }
+
+  function hydrateLinkPreviews() {
+    document.querySelectorAll("[data-link-preview]:not([data-preview-loaded])").forEach((element) => {
+      if (element.closest(".task-content-section.is-collapsed")) return;
+      const url = element.dataset.linkUrl;
+      if (!url) return;
+      getLinkPreview(url)
+        .then((preview) => applyLinkPreview(element, preview))
+        .catch(() => {
+          const stateLabel = element.querySelector("[data-link-state]");
+          if (stateLabel) {
+            stateLabel.textContent = "Preview unavailable";
+            stateLabel.className = "link-request-state state-unavailable";
+          }
+          element.dataset.previewLoaded = "true";
+        });
+    });
+  }
+
+  function renderColumn(column, columnIndex) {
+    const collapsed = state.collapsed.has(column.id);
+    const items = getFilteredItems(column.id);
+    const description = column.description ? `<p class="column-description">${escapeHtml(column.description)}</p>` : "";
+    const columnLinks = getColumnLinks(column);
+    const links = columnLinks.length
+      ? `<div class="column-reference-links" aria-label="List links">${columnLinks.map(link => renderBoardReferenceLink({ url: link.url, label: link.title })).join("")}</div>`
+      : "";
+    const tasks = items.length
+      ? items.map(renderTask).join("")
+      : `<div class="empty-list"><strong>${els.searchInput.value.trim() || els.priorityFilter.value !== "all" ? "No matching tasks" : "Nothing here yet"}</strong>${els.searchInput.value.trim() || els.priorityFilter.value !== "all" ? "Try changing the filters." : "Add a task to get started."}</div>`;
+
+    return `
+      <section class="column ${collapsed ? "is-collapsed" : ""}" data-column-id="${escapeHtml(column.id)}" style="--column-accent:${escapeHtml(column.color || "#5b8def")};animation-delay:${Math.min(columnIndex * 45, 220)}ms">
+        <header class="column-head">
+          <span class="column-colour"></span>
+          <div class="column-title"><h2 title="${escapeHtml(column.title)}">${escapeHtml(column.title)}</h2><span class="column-count">${items.length}</span></div>
+          <div class="column-head-actions">
+            <button class="column-action" type="button" data-action="edit-column" data-id="${escapeHtml(column.id)}" title="Listeyi düzenle" aria-label="Listeyi düzenle"><svg viewBox="0 0 24 24"><path d="m4 16.5-.8 4.3 4.3-.8L19.7 7.8a2.1 2.1 0 0 0-3-3L4 16.5Z"/><path d="m15.3 6.2 3 3"/></svg></button>
+            <button class="column-action" type="button" data-action="delete-column" data-id="${escapeHtml(column.id)}" title="Listeyi sil" aria-label="Listeyi sil"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M6.5 7l.8 13h9.4l.8-13M9 7V4h6v3"/></svg></button>
+            <button class="column-action" type="button" data-action="collapse-column" data-id="${escapeHtml(column.id)}" title="${collapsed ? "Genişlet" : "Daralt"}" aria-label="${collapsed ? "Genişlet" : "Daralt"}"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+          </div>
+        </header>
+        ${description}${links}
+        <div class="column-body">
+          <div class="task-list" data-task-list="${escapeHtml(column.id)}">${tasks}</div>
+          <button class="add-task-inline" type="button" data-action="add-task" data-id="${escapeHtml(column.id)}"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add a task</button>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderSpecialView() {
+    const search = els.searchInput.value.trim().toLocaleLowerCase("tr-TR");
+    const priority = els.priorityFilter.value;
+    const tasks = state.items.filter(item => {
+      const matchesSearch = !search || `${item.title || ""} ${item.description || ""}`.toLocaleLowerCase("tr-TR").includes(search);
+      const matchesPriority = priority === "all" || item.priority === priority;
+      return matchesSearch && matchesPriority;
+    }).sort((a,b) => {
+      if (state.view === "today" || state.view === "upcoming") return new Date(a.due_date || "9999-12-31") - new Date(b.due_date || "9999-12-31");
+      return new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at);
+    });
+    const heading = state.view === "weekly" ? `<div class="review-summary"><div><strong>${tasks.filter(t=>t.status==='completed').length}</strong><span>Completed</span></div><div><strong>${tasks.filter(t=>t.status!=='completed' && t.due_date && isOverdue(t.due_date)).length}</strong><span>Overdue</span></div><div><strong>${tasks.length}</strong><span>In review</span></div></div>` : "";
+    if (!tasks.length) {
+      els.columnsBoard.innerHTML = `${heading}<div class="empty-board"><h2>Nothing here</h2><p>${state.view === "inbox" ? "Capture a thought or task and sort it later." : "No tasks match this view yet."}</p><button class="button button-primary" id="emptyQuickAdd" type="button">${state.view === "inbox" ? "Quick capture" : "Add task"}</button></div>`;
+      return;
+    }
+    els.columnsBoard.innerHTML = `${heading}<section class="smart-view-list"><div class="smart-view-list-head"><strong>${tasks.length} items</strong><span>${state.view === "weekly" ? "This week" : "Sorted automatically"}</span></div>${tasks.map(renderTask).join("")}</section>`;
+    hydrateLinkPreviews();
+  }
+
+  function renderColumns() {
+    if (state.view) { renderSpecialView(); return; }
+    if (!state.columns.length) {
+      const inBoard = state.mode === "board";
+      els.columnsBoard.innerHTML = `
+        <div class="empty-board">
+          <h2>${inBoard ? "This board is empty" : "No independent lists yet"}</h2>
+          <p>${inBoard ? "Start with a list for the work you need to organise. You can add tasks underneath it." : "Create a standalone list for things that do not belong to a board."}</p>
+          <button class="button button-primary" type="button" id="emptyAddColumn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add a list</button>
+        </div>`;
+      return;
+    }
+
+    const search = els.searchInput.value.trim().toLocaleLowerCase("tr-TR");
+    const priority = els.priorityFilter.value;
+    const visibleColumns = state.columns;
+    els.columnsBoard.innerHTML = `${visibleColumns.map(renderColumn).join("")}<button class="add-column-tile" id="addColumnTile" type="button"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add another list</button>`;
+    hydrateLinkPreviews();
+
+    if (search || priority !== "all") {
+      // Keep empty lists visible; only task cards are filtered, as in a board's filter mode.
+    }
+  }
+
+  function renderAll() {
+    renderSidebar();
+    renderHeader();
+    renderColumns();
+  }
+
+  async function loadBoards() {
+    const data = await api("/boards");
+    state.boards = Array.isArray(data) ? data : [];
+  }
+
+  async function loadBoardLinks(boardId = state.currentBoardId) {
+    if (!boardId || state.mode !== "board") { state.boardLinks = []; return; }
+    const data = await api(`/boards/${encodeURIComponent(boardId)}/links`);
+    state.boardLinks = Array.isArray(data) ? data : [];
+  }
+
+  async function loadColumns() {
+    const query = state.view ? "" : state.mode === "independent" ? "?board_id=null" : `?board_id=${encodeURIComponent(state.currentBoardId)}`;
+    const data = await api(`/columns${query}`);
+    state.columns = Array.isArray(data) ? data : [];
+  }
+
+  async function loadItems() {
+    const query = state.view ? `?view=${encodeURIComponent(state.view)}` : state.mode === "independent" ? "?board_id=null" : `?board_id=${encodeURIComponent(state.currentBoardId)}`;
+    const data = await api(`/items${query}`);
+    state.items = Array.isArray(data) ? data : [];
+  }
+
+  async function refreshWorkspace(showToast = false) {
+    state.loading = true;
+    els.columnsBoard.innerHTML = `<div class="loading-state"><span class="loader"></span><span>Board yükleniyor…</span></div>`;
+    try {
+      await loadBoards();
+      if (state.mode === "board" && !state.boards.some((board) => board.id === state.currentBoardId)) {
+        state.mode = "independent";
+        state.currentBoardId = null;
+      }
+      await Promise.all([loadColumns(), loadItems(), state.mode === "board" ? loadBoardLinks() : Promise.resolve()]);
+      await api("/health");
+      setConnection(true, "API connected");
+      renderAll();
+      els.lastUpdated.textContent = `Az önce · ${new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`;
+      if (showToast) toast("Board yenilendi.");
+    } catch (error) {
+      setConnection(false, "API unavailable");
+      els.columnsBoard.innerHTML = `
+        <div class="empty-board">
+          <h2>Board yüklenemedi</h2>
+          <p>${escapeHtml(error.message)}<br><br>Board ve kolon API'lerinin yanında item API'sinin de kurulu olduğundan emin ol.</p>
+          <button class="button button-quiet" id="retryButton" type="button">Try again</button>
+        </div>`;
+      renderSidebar();
+      renderHeader();
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  function populateColumnBoardOptions(selectedValue = "") {
+    els.columnBoard.innerHTML = `<option value="">Independent</option>${state.boards.map((board) => `<option value="${escapeHtml(board.id)}">${escapeHtml(board.title)}</option>`).join("")}`;
+    els.columnBoard.value = selectedValue || "";
+  }
+
+  function addBoardLinkRow(link = {}) {
+    if (!els.boardLinksEditor) return;
+    const row = document.createElement("div");
+    row.className = "board-link-edit-row";
+    row.innerHTML = `
+      <input class="form-input board-link-title" maxlength="100" placeholder="Link name" aria-label="Link name">
+      <input class="form-input board-link-url" type="url" placeholder="https://…" aria-label="Link URL">
+      <button class="icon-btn board-link-remove" type="button" title="Remove link" aria-label="Remove link">×</button>`;
+    row.querySelector(".board-link-title").value = link.title || "";
+    row.querySelector(".board-link-url").value = link.url || "";
+    row.querySelector(".board-link-remove").addEventListener("click", () => row.remove());
+    els.boardLinksEditor.appendChild(row);
+  }
+
+  function collectBoardLinks() {
+    return Array.from(els.boardLinksEditor?.querySelectorAll(".board-link-edit-row") || [])
+      .map(row => ({ title: row.querySelector(".board-link-title").value.trim(), url: row.querySelector(".board-link-url").value.trim() }))
+      .filter(link => link.url)
+      .map(link => ({ title: link.title || new URL(link.url).hostname, url: link.url }));
+  }
+
+  function openBoardDialog(board = null) {
+    els.boardForm.reset();
+    els.boardId.value = board?.id || "";
+    els.boardTitle.value = board?.title || "";
+    els.boardDescription.value = boardDescriptionText(board) || "";
+    if (els.boardUrl) els.boardUrl.value = ""; // Optional legacy field; newer HTML uses the multi-link editor.
+    els.boardColor.value = board?.color || "#4f86f7";
+    els.boardLinksEditor.innerHTML = "";
+    const currentLinks = board ? boardReferenceUrls(board) : [];
+    currentLinks.forEach(link => addBoardLinkRow({ title: link.label, url: link.url }));
+    if (!currentLinks.length) addBoardLinkRow();
+    els.boardModalTitle.textContent = board ? "Board settings" : "Create a board";
+    els.saveBoardButton.textContent = board ? "Save changes" : "Create board";
+    els.deleteBoardButton.hidden = !board;
+    els.boardDialog.showModal();
+    window.setTimeout(() => els.boardTitle.focus(), 70);
+  }
+
+  function getColumnLinks(column) {
+    const links = [];
+    const seen = new Set();
+    const add = (raw, title = "") => {
+      const url = safeUrl(String(raw || "").trim());
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      let host = "Link";
+      try { host = new URL(url).hostname; } catch {}
+      links.push({ title: String(title || host).slice(0, 100), url });
+    };
+    const stored = column?.properties?.links;
+    if (Array.isArray(stored)) stored.forEach(entry => {
+      if (typeof entry === "string") add(entry);
+      else if (entry && typeof entry === "object") add(entry.url || entry.href, entry.title || entry.label || entry.name);
+    });
+    // Migrate the old single URL into the new list without deleting it from the record.
+    add(column?.url, "");
+    return links;
+  }
+
+  function addColumnLinkRow(link = {}) {
+    if (!els.columnLinksEditor) return;
+    const row = document.createElement("div");
+    row.className = "board-link-edit-row column-link-edit-row";
+    row.innerHTML = `
+      <input class="form-input board-link-title" maxlength="100" placeholder="Link name" aria-label="Link name">
+      <input class="form-input board-link-url" type="url" placeholder="https://…" aria-label="Link URL">
+      <button class="icon-btn board-link-remove" type="button" title="Remove link" aria-label="Remove link">×</button>`;
+    row.querySelector(".board-link-title").value = link.title || "";
+    row.querySelector(".board-link-url").value = link.url || "";
+    row.querySelector(".board-link-remove").addEventListener("click", () => row.remove());
+    els.columnLinksEditor.appendChild(row);
+  }
+
+  function collectColumnLinks() {
+    const rows = Array.from(els.columnLinksEditor?.querySelectorAll(".column-link-edit-row") || []);
+    const links = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const raw = row.querySelector(".board-link-url").value.trim();
+      if (!raw) continue;
+      const url = safeUrl(raw);
+      if (!url) throw new Error(`Geçersiz URL: ${raw}`);
+      if (seen.has(url)) continue;
+      seen.add(url);
+      const title = row.querySelector(".board-link-title").value.trim() || new URL(url).hostname;
+      links.push({ title, url });
+    }
+    return links;
+  }
+
+  function openColumnDialog(column = null) {
+    els.columnForm.reset();
+    els.columnId.value = column?.id || "";
+    els.columnTitle.value = column?.title || "";
+    els.columnDescription.value = column?.description || "";
+    els.columnUrl.value = column?.url || "";
+    els.columnColor.value = column?.color || "#5b8def";
+    els.columnProperties.value = JSON.stringify(column?.properties || {}, null, 2);
+    if (els.columnLinksEditor) {
+      els.columnLinksEditor.innerHTML = "";
+      const existingLinks = column ? getColumnLinks(column) : [];
+      existingLinks.forEach(link => addColumnLinkRow(link));
+      if (!existingLinks.length) addColumnLinkRow();
+    }
+    const selectedBoardId = column ? (column.board_id || "") : (state.mode === "board" ? state.currentBoardId : "");
+    populateColumnBoardOptions(selectedBoardId);
+    els.columnModalTitle.textContent = column ? "Edit list" : "Add a list";
+    els.saveColumnButton.textContent = column ? "Save changes" : "Add list";
+    els.columnDialog.showModal();
+    window.setTimeout(() => els.columnTitle.focus(), 70);
+  }
+
+  function dateInputValue(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 10);
+  }
+
+  function populateTaskColumns(selectedId = "", includeInbox = false) {
+    els.taskColumn.innerHTML = `${includeInbox ? '<option value="__inbox">Inbox</option>' : ""}${state.columns.map((column) => `<option value="${escapeHtml(column.id)}">${escapeHtml(column.title)}</option>`).join("")}`;
+    if (includeInbox && (!selectedId || selectedId === "__inbox")) els.taskColumn.value = "__inbox";
+    else if (selectedId && state.columns.some((column) => column.id === selectedId)) els.taskColumn.value = selectedId;
+    else if (state.columns[0]) els.taskColumn.value = state.columns[0].id;
+  }
+
+  function placeTaskPopover(anchor) {
+    const dialog = els.taskDialog;
+    const rect = anchor.getBoundingClientRect();
+    const box = dialog.getBoundingClientRect();
+    const margin = 12;
+    const gap = 12;
+    let left = rect.right + gap;
+    if (left + box.width > window.innerWidth - margin) left = rect.left - box.width - gap;
+    if (left < margin) left = Math.max(margin, Math.min(window.innerWidth - box.width - margin, rect.left + rect.width / 2 - box.width / 2));
+    const top = Math.max(margin, Math.min(rect.top - 6, window.innerHeight - box.height - margin));
+    dialog.style.left = `${Math.round(left)}px`;
+    dialog.style.top = `${Math.round(top)}px`;
+  }
+
+  function openTaskDialog(task = null, preferredColumnId = null, anchor = null) {
+    if (!state.columns.length && state.view !== "inbox") {
+      toast("Önce bir liste oluştur.", "error");
+      openColumnDialog();
+      return;
+    }
+
+    els.taskForm.reset();
+    els.taskId.value = task?.id || "";
+    els.taskTitle.value = task?.title || "";
+    els.taskDescription.value = task?.description || "";
+    els.taskPriority.value = task?.priority || "normal";
+    if (els.taskType) els.taskType.value = task?.item_type || "task";
+    els.taskStatus.value = statusPreset(task?.status).value;
+    els.taskStartDate.value = dateInputValue(task?.start_date);
+    els.taskDueDate.value = dateInputValue(task?.due_date);
+    const custom = task?.custom_values && typeof task.custom_values === "object" ? task.custom_values : {};
+    els.taskTags.value = Array.isArray(custom.tags) ? custom.tags.join(", ") : "";
+    const savedLinks = collectItemLinks(task || {});
+    renderTaskLinkEditor(savedLinks);
+    els.taskCustomValues.value = JSON.stringify(Object.fromEntries(Object.entries(custom).filter(([key]) => !["tags", "links"].includes(key))), null, 2);
+    populateTaskColumns(task?.is_inbox ? "__inbox" : (task?.column_id || preferredColumnId || state.columns[0]?.id), true);
+    if (els.subtasksPanel) els.subtasksPanel.hidden = !task?.id;
+    if (els.relationsPanel) els.relationsPanel.hidden = !task?.id;
+    if (task?.id) { loadSubtasks(task.id).catch(e => toast(e.message, "error")); loadRelations(task.id).catch(e => toast(e.message, "error")); }
+    els.taskModalTitle.textContent = task ? "Edit task" : "Add a task";
+    els.taskModalEyebrow.textContent = task ? "TASK DETAILS" : "NEW TASK";
+    els.saveTaskButton.textContent = task ? "Save changes" : "Add task";
+    els.deleteTaskButton.hidden = !task;
+    if (els.archiveTaskButton) { els.archiveTaskButton.hidden = !task; els.archiveTaskButton.textContent = task?.archived_at ? "Restore" : "Archive"; }
+    state.taskPhotos = [];
+    state.pendingPhotos.forEach((photo) => URL.revokeObjectURL(photo.previewUrl));
+    state.pendingPhotos = [];
+    els.taskPhotosInput.value = "";
+    renderTaskPhotos();
+    if (task && anchor) {
+      els.taskDialog.classList.add("is-anchored");
+      els.taskDialog.show();
+      requestAnimationFrame(() => placeTaskPopover(anchor));
+    } else {
+      els.taskDialog.classList.remove("is-anchored");
+      els.taskDialog.style.left = "";
+      els.taskDialog.style.top = "";
+      els.taskDialog.showModal();
+    }
+    if (task?.id) loadTaskPhotos(task.id).catch((error) => toast(error.message, "error"));
+    window.setTimeout(() => els.taskTitle.focus(), 70);
+  }
+
+  async function submitBoard(event) {
+    event.preventDefault();
+    const id = els.boardId.value;
+    const body = {
+      title: els.boardTitle.value.trim(),
+      description: els.boardDescription.value.trim() || null,
+      url: null,
+      color: els.boardColor.value
+    };
+    if (!body.title) return;
+    els.saveBoardButton.disabled = true;
+    try {
+      const result = id
+        ? await api(`/boards/${encodeURIComponent(id)}`, { method: "PATCH", body })
+        : await api("/boards", { method: "POST", body });
+      const savedBoardId = result?.id || result?.board?.id || result?.data?.id || id;
+      await api(`/boards/${encodeURIComponent(savedBoardId)}/links`, {
+        method: "PUT",
+        body: { links: collectBoardLinks() }
+      });
+      els.boardDialog.close();
+      await loadBoards();
+      state.mode = "board";
+      state.currentBoardId = savedBoardId;
+      state.collapsed.clear();
+      await Promise.all([loadColumns(), loadItems(), loadBoardLinks(savedBoardId)]);
+      renderAll();
+      toast(id ? "Board updated." : "Board created.");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      els.saveBoardButton.disabled = false;
+    }
+  }
+
+  async function submitColumn(event) {
+    event.preventDefault();
+    const id = els.columnId.value;
+    let properties;
+    try {
+      properties = JSON.parse(els.columnProperties.value || "{}");
+      if (!properties || typeof properties !== "object" || Array.isArray(properties)) throw new Error("JSON bir nesne olmalı.");
+    } catch (error) {
+      toast(`Properties: ${error.message}`, "error");
+      return;
+    }
+
+    let columnLinks;
+    try { columnLinks = collectColumnLinks(); }
+    catch (error) { toast(error.message, "error"); return; }
+    // Keep unrelated custom properties intact; only replace the links collection.
+    properties.links = columnLinks;
+    const body = {
+      title: els.columnTitle.value.trim(),
+      description: els.columnDescription.value.trim() || null,
+      // Keep the first URL in the legacy field for older clients; all links live in properties.links.
+      url: columnLinks[0]?.url || els.columnUrl.value.trim() || null,
+      color: els.columnColor.value,
+      board_id: els.columnBoard.value || null,
+      position: id ? (state.columns.find((column) => column.id === id)?.position ?? 0) : state.columns.length,
+      properties
+    };
+    if (!body.title) return;
+    els.saveColumnButton.disabled = true;
+    try {
+      if (id) await api(`/columns/${encodeURIComponent(id)}`, { method: "PATCH", body });
+      else await api("/columns", { method: "POST", body });
+      els.columnDialog.close();
+      await Promise.all([loadBoards(), loadColumns(), loadItems()]);
+      renderAll();
+      toast(id ? "List updated." : "List added.");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      els.saveColumnButton.disabled = false;
+    }
+  }
+
+  async function submitTask(event) {
+    event.preventDefault();
+    const id = els.taskId.value;
+    let customValues;
+    try {
+      customValues = JSON.parse(els.taskCustomValues.value || "{}");
+      if (!customValues || typeof customValues !== "object" || Array.isArray(customValues)) throw new Error("JSON bir nesne olmalı.");
+    } catch (error) {
+      toast(`Custom values: ${error.message}`, "error");
+      return;
+    }
+
+    const tags = els.taskTags.value.split(",").map((tag) => tag.trim()).filter(Boolean);
+    if (tags.length) customValues.tags = tags;
+    else delete customValues.tags;
+
+    const links = readTaskLinkEditor();
+    // Keep all task links in the existing JSONB field; no existing item data is discarded.
+    if (links.length) customValues.links = links;
+    else delete customValues.links;
+
+    const wantsInbox = els.taskColumn.value === "__inbox";
+    const body = {
+      ...(wantsInbox ? {} : { column_id: els.taskColumn.value || null }),
+      inbox: wantsInbox,
+      item_type: els.taskType?.value || "task",
+      title: els.taskTitle.value.trim(),
+      description: els.taskDescription.value.trim() || null,
+      priority: els.taskPriority.value,
+      status: els.taskStatus.value,
+      start_date: els.taskStartDate.value || null,
+      due_date: els.taskDueDate.value || null,
+      custom_values: customValues
+    };
+    if (!body.title || (!body.column_id && !body.inbox)) return;
+
+    els.saveTaskButton.disabled = true;
+    try {
+      const savedItem = id
+        ? await api(`/items/${encodeURIComponent(id)}`, { method: "PATCH", body })
+        : await api("/items", { method: "POST", body });
+
+      // Once a new item exists, pending local images can be uploaded against its ID.
+      if (!id && savedItem?.id) {
+        els.taskId.value = savedItem.id;
+        els.taskModalTitle.textContent = "Edit task";
+        els.taskModalEyebrow.textContent = "TASK DETAILS";
+        els.saveTaskButton.textContent = "Save changes";
+        els.deleteTaskButton.hidden = false;
+      }
+
+      await Promise.all([loadBoards(), loadColumns(), loadItems()]);
+      renderAll();
+
+      const itemId = savedItem?.id || id;
+      while (state.pendingPhotos.length && itemId) {
+        const pending = state.pendingPhotos[0];
+        await uploadTaskPhoto(itemId, pending.file);
+        URL.revokeObjectURL(pending.previewUrl);
+        state.pendingPhotos.shift();
+        renderTaskPhotos();
+      }
+      if (itemId) {
+        await loadTaskPhotos(itemId);
+        await loadItems();
+        renderAll();
+      }
+
+      els.taskDialog.close();
+      toast(id ? "Task updated." : "Task added.");
+      els.lastUpdated.textContent = `Kaydedildi · ${new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`;
+    } catch (error) {
+      if (els.taskId.value) {
+        loadTaskPhotos(els.taskId.value).catch(() => {});
+      }
+      toast(error.message, "error");
+    } finally {
+      els.saveTaskButton.disabled = false;
+    }
+  }
+
+  function renderTaskLinkEditor(links = []) {
+    if (!els.taskLinksEditor) return;
+    els.taskLinksEditor.innerHTML = "";
+    (Array.isArray(links) ? links : []).forEach((link) => addTaskLinkRow(link));
+    if (!links.length) addTaskLinkRow();
+  }
+
+  function addTaskLinkRow(link = {}) {
+    if (!els.taskLinksEditor) return;
+    const row = document.createElement("div");
+    row.className = "task-link-edit-row";
+    row.innerHTML = `
+      <input class="form-input task-link-label" maxlength="100" placeholder="Link name (e.g. GitHub)" aria-label="Link name">
+      <input class="form-input task-link-url" type="url" placeholder="https://…" aria-label="Link URL">
+      <button class="icon-btn task-link-remove" type="button" title="Remove link" aria-label="Remove link">×</button>`;
+    row.querySelector(".task-link-label").value = link.label || link.title || "";
+    row.querySelector(".task-link-url").value = link.url || link.href || (typeof link === "string" ? link : "");
+    row.querySelector(".task-link-remove").addEventListener("click", () => {
+      row.remove();
+      if (!els.taskLinksEditor.children.length) addTaskLinkRow();
+    });
+    els.taskLinksEditor.appendChild(row);
+  }
+
+  function readTaskLinkEditor() {
+    return Array.from(els.taskLinksEditor?.querySelectorAll(".task-link-edit-row") || [])
+      .map((row) => {
+        const label = row.querySelector(".task-link-label").value.trim();
+        let rawUrl = row.querySelector(".task-link-url").value.trim();
+        if (rawUrl && !/^https?:\/\//i.test(rawUrl)) rawUrl = `https://${rawUrl}`;
+        const url = safeUrl(rawUrl);
+        return url ? { ...(label ? { label } : {}), url } : null;
+      }).filter(Boolean);
+  }
+
+  async function toggleTaskPin(taskId) {
+    const task = state.items.find((item) => item.id === taskId);
+    if (!task) return;
+    const nextPinned = !Boolean(task.is_pinned);
+    try {
+      await api(`/items/${encodeURIComponent(taskId)}`, { method: "PATCH", body: { is_pinned: nextPinned } });
+      await loadItems();
+      renderColumns();
+      toast(nextPinned ? "Task pinned to the top." : "Task unpinned.");
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function renderTaskPhotos() {
+    if (!els.taskPhotoGrid) return;
+    const existing = state.taskPhotos.map((photo) => {
+      const url = safePhotoUrl(photo.url);
+      if (!url) return "";
+      return `<div class="photo-thumb"><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(photo.original_name || "photo")}"><img src="${escapeHtml(url)}" alt="${escapeHtml(photo.original_name || "Task photo")}" loading="lazy"></a><button type="button" class="photo-remove" data-delete-photo="${escapeHtml(photo.id)}" aria-label="Fotoğrafı sil">×</button></div>`;
+    }).join("");
+    const pending = state.pendingPhotos.map((photo, index) => `<div class="photo-thumb is-pending"><img src="${escapeHtml(photo.previewUrl)}" alt="${escapeHtml(photo.file.name)}"><button type="button" class="photo-remove" data-remove-pending-photo="${index}" aria-label="Fotoğrafı kaldır">×</button><span class="photo-pending-label">Pending</span></div>`).join("");
+    const content = existing + pending;
+    els.taskPhotoGrid.innerHTML = content || `<p class="photo-empty">No photos attached yet.</p>`;
+  }
+
+  async function loadTaskPhotos(itemId) {
+    if (!itemId) return;
+    const data = await api(`/items/${encodeURIComponent(itemId)}/photos`);
+    state.taskPhotos = Array.isArray(data) ? data : [];
+    renderTaskPhotos();
+  }
+
+  async function uploadTaskPhoto(itemId, file) {
+    const formData = new FormData();
+    formData.append("photo", file);
+    let response;
+    try {
+      response = await fetch(`${API}/items/${encodeURIComponent(itemId)}/photos`, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        body: formData
+      });
+    } catch {
+      throw new Error("Fotoğraf yüklenemedi. Sunucu bağlantısını kontrol et.");
+    }
+    const raw = await response.text();
+    let data = null;
+    if (raw) {
+      try { data = JSON.parse(raw); } catch { data = { message: raw }; }
+    }
+    if (!response.ok) throw new Error(data?.message || `Fotoğraf yüklenemedi (${response.status})`);
+    return data;
+  }
+
+  async function handlePhotoSelection(files) {
+    const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"]);
+    const selected = Array.from(files || []);
+    const valid = selected.filter((file) => {
+      if (!allowed.has(file.type)) {
+        toast(`${file.name}: Bu fotoğraf biçimi desteklenmiyor.`, "error");
+        return false;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        toast(`${file.name}: Fotoğraf 10 MB sınırını aşıyor.`, "error");
+        return false;
+      }
+      return true;
+    });
+    if (!valid.length) return;
+
+    const itemId = els.taskId.value;
+    if (!itemId) {
+      valid.forEach((file) => state.pendingPhotos.push({ file, previewUrl: URL.createObjectURL(file) }));
+      renderTaskPhotos();
+      toast(`${valid.length} fotoğraf kaydetmeye hazır.`);
+      return;
+    }
+
+    els.taskPhotosInput.disabled = true;
+    try {
+      for (const file of valid) await uploadTaskPhoto(itemId, file);
+      await loadTaskPhotos(itemId);
+      await loadItems();
+      renderColumns();
+      toast(valid.length === 1 ? "Fotoğraf eklendi." : `${valid.length} fotoğraf eklendi.`);
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      els.taskPhotosInput.disabled = false;
+      els.taskPhotosInput.value = "";
+    }
+  }
+
+  async function deleteTaskPhoto(photoId) {
+    const itemId = els.taskId.value;
+    if (!itemId || !photoId) return;
+    try {
+      await api(`/items/${encodeURIComponent(itemId)}/photos/${encodeURIComponent(photoId)}`, { method: "DELETE" });
+      await loadTaskPhotos(itemId);
+      await loadItems();
+      renderColumns();
+      toast("Fotoğraf silindi.");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  async function toggleItemContentSection(button) {
+    const itemId = button.dataset.taskId;
+    const sectionName = button.dataset.section;
+    const task = state.items.find((item) => item.id === itemId);
+    if (!task || !sectionName) return;
+
+    const previous = task.content_state && typeof task.content_state === "object" ? task.content_state : {};
+    const previousSections = previous.collapsed_sections && typeof previous.collapsed_sections === "object"
+      ? previous.collapsed_sections
+      : {};
+    const currentlyCollapsed = Object.prototype.hasOwnProperty.call(previousSections, sectionName)
+      ? Boolean(previousSections[sectionName])
+      : sectionName === "details";
+    const next = {
+      ...previous,
+      collapsed_sections: { ...previousSections, [sectionName]: !currentlyCollapsed }
+    };
+    task.content_state = next;
+
+    const section = button.closest("[data-content-section]");
+    section?.classList.toggle("is-collapsed", !currentlyCollapsed);
+    button.setAttribute("aria-expanded", String(currentlyCollapsed));
+    if (currentlyCollapsed) hydrateLinkPreviews();
+
+    try {
+      const updated = await api(`/items/${encodeURIComponent(itemId)}`, {
+        method: "PATCH",
+        body: { content_state: next }
+      });
+      task.content_state = updated.content_state || next;
+    } catch (error) {
+      task.content_state = previous;
+      section?.classList.toggle("is-collapsed", currentlyCollapsed);
+      button.setAttribute("aria-expanded", String(!currentlyCollapsed));
+      toast(error.message, "error");
+    }
+  }
+
+  function closeStatusPicker() {
+    els.statusPicker.hidden = true;
+    els.statusPicker.innerHTML = "";
+    els.statusPicker.removeAttribute("data-task-id");
+  }
+
+  function openStatusPicker(button, task) {
+    const rect = button.getBoundingClientRect();
+    const estimatedHeight = STATUS_PRESETS.length * 37 + 12;
+    const width = 190;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    const top = rect.bottom + estimatedHeight + 8 < window.innerHeight
+      ? rect.bottom + 6
+      : Math.max(8, rect.top - estimatedHeight - 6);
+    const current = statusPreset(task.status).value;
+    els.statusPicker.dataset.taskId = task.id;
+    els.statusPicker.innerHTML = STATUS_PRESETS.map((preset) => `
+      <button type="button" class="status-option status-${preset.value} ${preset.value === current ? "is-selected" : ""}" data-status-choice="${preset.value}" role="menuitemradio" aria-checked="${preset.value === current}">
+        <span class="status-indicator"></span><span>${preset.label}</span>${preset.value === current ? `<span class="status-option-check">✓</span>` : ""}
+      </button>
+    `).join("");
+    els.statusPicker.style.left = `${left}px`;
+    els.statusPicker.style.top = `${top}px`;
+    els.statusPicker.hidden = false;
+  }
+
+  async function updateTaskStatus(taskId, status) {
+    const task = state.items.find((item) => item.id === taskId);
+    if (!task || !STATUS_PRESETS.some((preset) => preset.value === status)) return;
+    if (statusPreset(task.status).value === status) {
+      closeStatusPicker();
+      return;
+    }
+    try {
+      const updated = await api(`/items/${encodeURIComponent(taskId)}`, { method: "PATCH", body: { status } });
+      Object.assign(task, updated);
+      closeStatusPicker();
+      renderColumns();
+      els.lastUpdated.textContent = `Kaydedildi · ${new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`;
+      toast(`Durum: ${statusPreset(status).label}`);
+    } catch (error) {
+      closeStatusPicker();
+      toast(error.message, "error");
+    }
+  }
+
+  async function cycleTaskCheck(taskId) {
+    const task = state.items.find((item) => item.id === taskId);
+    if (!task) return;
+
+    const current = checkState(task.check_state);
+    const next = current === "empty" ? "checked" : current === "checked" ? "partial" : "empty";
+    const button = els.columnsBoard.querySelector(`[data-check-toggle][data-task-id="${CSS.escape(taskId)}"]`);
+    if (button) button.disabled = true;
+
+    try {
+      const updated = await api(`/items/${encodeURIComponent(taskId)}`, {
+        method: "PATCH",
+        body: { check_state: next }
+      });
+      Object.assign(task, updated);
+      renderColumns();
+      els.lastUpdated.textContent = "Kaydedildi";
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      const currentButton = els.columnsBoard.querySelector(`[data-check-toggle][data-task-id="${CSS.escape(taskId)}"]`);
+      if (currentButton) currentButton.disabled = false;
+    }
+  }
+
+  async function archiveCurrentTask() {
+    const id = els.taskId.value;
+    const task = state.items.find(item => item.id === id);
+    if (!id || !task) return;
+    try {
+      await api(`/items/${encodeURIComponent(id)}`, { method: "PATCH", body: { archived_at: task.archived_at ? null : new Date().toISOString(), is_inbox: false } });
+      els.taskDialog.close();
+      await Promise.all([loadColumns(), loadItems(), loadBoards()]); renderAll();
+      toast(task.archived_at ? "Task restored." : "Task archived.");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function deleteTask() {
+    const id = els.taskId.value;
+    const task = state.items.find((item) => item.id === id);
+    if (!id || !task) return;
+    if (!window.confirm(`“${task.title}” silinsin mi?`)) return;
+    try {
+      await api(`/items/${encodeURIComponent(id)}`, { method: "DELETE" });
+      els.taskDialog.close();
+      await Promise.all([loadColumns(), loadItems(), loadBoards()]);
+      renderAll();
+      toast("Task deleted.");
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function deleteColumn(id) {
+    const column = state.columns.find((entry) => entry.id === id);
+    if (!column) return;
+    if (!window.confirm(`“${column.title}” listesi ve içindeki tüm işler silinsin mi?`)) return;
+    try {
+      await api(`/columns/${encodeURIComponent(id)}`, { method: "DELETE" });
+      state.collapsed.delete(id);
+      await Promise.all([loadBoards(), loadColumns(), loadItems()]);
+      renderAll();
+      toast("List deleted.");
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function deleteCurrentBoard() {
+    const board = selectedBoard();
+    if (!board) return;
+    if (!window.confirm(`“${board.title}” board'u ve içindeki listeler silinsin mi?`)) return;
+    try {
+      await api(`/boards/${encodeURIComponent(board.id)}`, { method: "DELETE" });
+      state.mode = "independent";
+      state.currentBoardId = null;
+      state.collapsed.clear();
+      await refreshWorkspace();
+      toast("Board deleted.");
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function moveTask(taskId, targetColumnId, beforeTaskId = null) {
+    const task = state.items.find((item) => item.id === taskId);
+    if (!task || !targetColumnId) return;
+
+    const previousColumnId = task.column_id;
+    const targetItems = state.items
+      .filter((item) => item.column_id === targetColumnId && item.id !== taskId)
+      .sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+    let insertAt = targetItems.length;
+    if (beforeTaskId) {
+      const foundIndex = targetItems.findIndex((item) => item.id === beforeTaskId);
+      if (foundIndex >= 0) insertAt = foundIndex;
+    }
+    targetItems.splice(insertAt, 0, { ...task, column_id: targetColumnId });
+
+    try {
+      await Promise.all(targetItems.map((item, position) => api(`/items/${encodeURIComponent(item.id)}`, {
+        method: "PATCH", body: { column_id: targetColumnId, position }
+      })));
+      if (previousColumnId !== targetColumnId) {
+        const sourceItems = state.items
+          .filter((item) => item.column_id === previousColumnId && item.id !== taskId)
+          .sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+        await Promise.all(sourceItems.map((item, position) => api(`/items/${encodeURIComponent(item.id)}`, {
+          method: "PATCH", body: { position }
+        })));
+      }
+      await Promise.all([loadColumns(), loadItems(), loadBoards()]);
+      renderAll();
+      toast(previousColumnId === targetColumnId ? "Task reordered." : "Task moved.");
+    } catch (error) {
+      toast(error.message, "error");
+      await Promise.all([loadColumns(), loadItems()]).catch(() => {});
+      renderAll();
+    }
+  }
+
+  async function selectView(view) {
+    state.view = view; state.mode = "view"; state.currentBoardId = null; state.collapsed.clear();
+    await refreshWorkspace();
+  }
+
+  async function loadSubtasks(itemId) {
+    const rows = await api(`/items/${encodeURIComponent(itemId)}/subtasks`);
+    const item = state.items.find(entry => entry.id === itemId);
+    if (item) { item.subtasks_total = rows.length; item.subtasks_done = rows.filter(row => row.is_completed).length; }
+    renderSubtasks(rows);
+    renderColumns();
+  }
+  function renderSubtasks(rows) {
+    const done = rows.filter(x => x.is_completed).length;
+    els.subtaskProgress.textContent = `${done} / ${rows.length}`;
+    els.subtaskList.innerHTML = rows.map(row => `<div class="subtask-row"><input type="checkbox" data-subtask-toggle="${escapeHtml(row.id)}" ${row.is_completed ? "checked" : ""}><span class="${row.is_completed ? "is-complete" : ""}">${escapeHtml(row.title)}</span><button type="button" data-subtask-delete="${escapeHtml(row.id)}" aria-label="Delete subtask">×</button></div>`).join("");
+  }
+  async function createSubtaskFromInput() {
+    const itemId = els.taskId.value; const title = els.newSubtaskTitle.value.trim();
+    if (!itemId || !title) return;
+    try { await api(`/items/${encodeURIComponent(itemId)}/subtasks`, { method: "POST", body: { title } }); els.newSubtaskTitle.value = ""; await loadSubtasks(itemId); }
+    catch (e) { toast(e.message, "error"); }
+  }
+  async function loadRelations(itemId) {
+    const rows = await api(`/items/${encodeURIComponent(itemId)}/relations`);
+    els.relationCount.textContent = String(rows.length);
+    els.relationList.innerHTML = rows.map(row => `<div class="relation-row"><span>${escapeHtml(row.title)}</span><small>${escapeHtml(row.column_title || row.item_type)}</small><button type="button" data-relation-delete="${escapeHtml(row.id)}">×</button></div>`).join("");
+    els.relatedItemSelect.innerHTML = `<option value="">Choose an item…</option>${state.items.filter(item => item.id !== itemId && !rows.some(r=>r.related_item_id===item.id)).map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)}</option>`).join("")}`;
+  }
+  async function createRelationFromSelect() {
+    const itemId = els.taskId.value; const related_item_id = els.relatedItemSelect.value;
+    if (!itemId || !related_item_id) return;
+    try { await api(`/items/${encodeURIComponent(itemId)}/relations`, { method: "POST", body: { related_item_id } }); await loadRelations(itemId); toast("Related item linked."); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  function selectBoard(id) {
+    state.view = null;
+    state.mode = "board";
+    state.currentBoardId = id;
+    state.collapsed.clear();
+    refreshWorkspace();
+  }
+
+  function bindEvents() {
+    $("#newBoardButton").addEventListener("click", () => openBoardDialog());
+    $("#addBoardSidebar").addEventListener("click", () => openBoardDialog());
+    $("#newColumnButton").addEventListener("click", () => openColumnDialog());
+    $("#newTaskButton").addEventListener("click", () => openTaskDialog());
+    els.clipboardTaskButton?.addEventListener("click", pasteFromClipboardToBoard);
+    els.pastePhotoButton?.addEventListener("click", pasteFromClipboardToTask);
+    els.independentNav.addEventListener("click", () => {
+      state.view = null;
+      state.mode = "independent";
+      state.currentBoardId = null;
+      state.collapsed.clear();
+      refreshWorkspace();
+    });
+    // Sidebar smart views (Inbox, Today, Upcoming, Completed, Weekly review).
+    // Use delegated handling so every nav button remains functional.
+    document.querySelectorAll("[data-view]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const view = button.dataset.view;
+        if (!view) return;
+        state.view = view;
+        state.mode = "view";
+        state.currentBoardId = null;
+        state.collapsed.clear();
+        refreshWorkspace();
+      });
+    });
+    els.boardList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-board-id]");
+      if (button) selectBoard(button.dataset.boardId);
+    });
+    els.boardEditButton.addEventListener("click", () => {
+      const board = selectedBoard();
+      if (board) openBoardDialog(board);
+    });
+    els.boardForm.addEventListener("submit", submitBoard);
+    els.addBoardLinkButton?.addEventListener("click", () => addBoardLinkRow());
+    els.deleteBoardButton.addEventListener("click", () => deleteCurrentBoard());
+    els.columnForm.addEventListener("submit", submitColumn);
+    els.addColumnLinkButton?.addEventListener("click", () => addColumnLinkRow());
+    els.taskForm.addEventListener("submit", submitTask);
+    els.addTaskLinkButton?.addEventListener("click", () => addTaskLinkRow());
+    els.deleteTaskButton.addEventListener("click", deleteTask);
+    els.archiveTaskButton?.addEventListener("click", archiveCurrentTask);
+    els.taskPhotosInput.addEventListener("change", () => handlePhotoSelection(els.taskPhotosInput.files));
+    document.addEventListener("paste", handleDocumentPaste);
+    if (els.photoDropzone) {
+      els.photoDropzone.addEventListener("dragover", (event) => {
+        if (Array.from(event.dataTransfer?.types || []).includes("Files")) {
+          event.preventDefault();
+          els.photoDropzone.classList.add("is-dragging");
+        }
+      });
+      els.photoDropzone.addEventListener("dragleave", (event) => {
+        if (!els.photoDropzone.contains(event.relatedTarget)) els.photoDropzone.classList.remove("is-dragging");
+      });
+      els.photoDropzone.addEventListener("drop", (event) => {
+        const hasFiles = Array.from(event.dataTransfer?.types || []).includes("Files");
+        if (!hasFiles) return;
+        event.preventDefault();
+        els.photoDropzone.classList.remove("is-dragging");
+        const files = uniqueFiles(event.dataTransfer?.files || []);
+        if (!files.length) {
+          toast("Buraya yalnızca desteklenen görseller eklenebilir.", "error");
+          return;
+        }
+        handlePhotoSelection(files);
+      });
+    }
+    els.taskPhotoGrid.addEventListener("click", (event) => {
+      const deleteButton = event.target.closest("[data-delete-photo]");
+      if (deleteButton) deleteTaskPhoto(deleteButton.dataset.deletePhoto);
+      const removeButton = event.target.closest("[data-remove-pending-photo]");
+      if (removeButton) {
+        const index = Number(removeButton.dataset.removePendingPhoto);
+        const [removed] = state.pendingPhotos.splice(index, 1);
+        if (removed) URL.revokeObjectURL(removed.previewUrl);
+        renderTaskPhotos();
+      }
+    });
+    els.statusPicker.addEventListener("click", (event) => {
+      const choice = event.target.closest("[data-status-choice]");
+      if (choice) updateTaskStatus(els.statusPicker.dataset.taskId, choice.dataset.statusChoice);
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest("[data-status-trigger]") && !els.statusPicker.contains(event.target)) closeStatusPicker();
+    });
+    window.addEventListener("scroll", closeStatusPicker, true);
+    window.addEventListener("resize", closeStatusPicker);
+    document.addEventListener("pointerdown", (event) => {
+      if (!els.taskDialog.open || !els.taskDialog.classList.contains("is-anchored")) return;
+      if (els.taskDialog.contains(event.target) || event.target.closest("[data-task-id]")) return;
+      els.taskDialog.close();
+    });
+    window.addEventListener("resize", () => {
+      if (!els.taskDialog.open || !els.taskDialog.classList.contains("is-anchored")) return;
+      const activeCard = document.querySelector(`.task-card[data-task-id="${CSS.escape(els.taskId.value)}"]`);
+      if (activeCard) placeTaskPopover(activeCard);
+      else els.taskDialog.close();
+    });
+    window.addEventListener("scroll", () => {
+      if (!els.taskDialog.open || !els.taskDialog.classList.contains("is-anchored")) return;
+      const activeCard = document.querySelector(`.task-card[data-task-id="${CSS.escape(els.taskId.value)}"]`);
+      if (activeCard) placeTaskPopover(activeCard);
+      else els.taskDialog.close();
+    }, true);
+
+    els.taskDialog.addEventListener("click", async (event) => {
+      const toggle = event.target.closest("[data-subtask-toggle]");
+      const remove = event.target.closest("[data-subtask-delete]");
+      const unlink = event.target.closest("[data-relation-delete]");
+      const itemId = els.taskId.value;
+      try {
+        if (toggle && itemId) { await api(`/items/${encodeURIComponent(itemId)}/subtasks/${encodeURIComponent(toggle.dataset.subtaskToggle)}`, { method: "PATCH", body: { is_completed: toggle.checked } }); await loadSubtasks(itemId); }
+        if (remove && itemId) { await api(`/items/${encodeURIComponent(itemId)}/subtasks/${encodeURIComponent(remove.dataset.subtaskDelete)}`, { method: "DELETE" }); await loadSubtasks(itemId); }
+        if (unlink && itemId) { await api(`/items/${encodeURIComponent(itemId)}/relations/${encodeURIComponent(unlink.dataset.relationDelete)}`, { method: "DELETE" }); await loadRelations(itemId); }
+      } catch (e) { toast(e.message, "error"); }
+    });
+    els.taskDialog.addEventListener("close", () => {
+      els.taskDialog.classList.remove("is-anchored");
+      els.taskDialog.style.left = "";
+      els.taskDialog.style.top = "";
+      state.pendingPhotos.forEach((photo) => URL.revokeObjectURL(photo.previewUrl));
+      state.pendingPhotos = [];
+      state.taskPhotos = [];
+      renderTaskPhotos();
+    });
+
+    els.columnsBoard.addEventListener("click", (event) => {
+      if (event.target.closest("#retryButton")) return refreshWorkspace();
+      if (event.target.closest("#emptyAddColumn") || event.target.closest("#addColumnTile")) return openColumnDialog();
+      if (event.target.closest("#emptyQuickAdd")) return openTaskDialog();
+
+      const sectionToggle = event.target.closest("[data-item-section-toggle]");
+      if (sectionToggle) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleItemContentSection(sectionToggle);
+        return;
+      }
+
+      if (event.target.closest(".task-link-preview, .task-inline-photo")) {
+        event.stopPropagation();
+        return;
+      }
+
+      const pinToggle = event.target.closest("[data-pin-toggle]");
+      if (pinToggle) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleTaskPin(pinToggle.dataset.taskId);
+        return;
+      }
+
+      const checkToggle = event.target.closest("[data-check-toggle]");
+      if (checkToggle) {
+        event.preventDefault();
+        event.stopPropagation();
+        cycleTaskCheck(checkToggle.dataset.taskId);
+        return;
+      }
+
+      const statusTrigger = event.target.closest("[data-status-trigger]");
+      if (statusTrigger) {
+        event.preventDefault();
+        event.stopPropagation();
+        const task = state.items.find((item) => item.id === statusTrigger.closest("[data-task-id]")?.dataset.taskId);
+        if (!task) return;
+        if (!els.statusPicker.hidden && els.statusPicker.dataset.taskId === task.id) closeStatusPicker();
+        else openStatusPicker(statusTrigger, task);
+        return;
+      }
+
+      const deletePhoto = event.target.closest("[data-delete-photo]");
+      if (deletePhoto) {
+        event.preventDefault();
+        event.stopPropagation();
+        return deleteTaskPhoto(deletePhoto.dataset.deletePhoto);
+      }
+      const removePending = event.target.closest("[data-remove-pending-photo]");
+      if (removePending) {
+        event.preventDefault();
+        event.stopPropagation();
+        const index = Number(removePending.dataset.removePendingPhoto);
+        const [removed] = state.pendingPhotos.splice(index, 1);
+        if (removed) URL.revokeObjectURL(removed.previewUrl);
+        renderTaskPhotos();
+        return;
+      }
+
+      const action = event.target.closest("[data-action]");
+      if (action) {
+        const id = action.dataset.id;
+        const column = state.columns.find((entry) => entry.id === id);
+        if (!column) return;
+        if (action.dataset.action === "edit-column") openColumnDialog(column);
+        if (action.dataset.action === "delete-column") deleteColumn(id);
+        if (action.dataset.action === "collapse-column") {
+          if (state.collapsed.has(id)) state.collapsed.delete(id);
+          else state.collapsed.add(id);
+          renderColumns();
+        }
+        if (action.dataset.action === "add-task") openTaskDialog(null, id);
+        return;
+      }
+      const card = event.target.closest("[data-task-id]");
+      if (card) {
+        const task = state.items.find((item) => item.id === card.dataset.taskId);
+        if (task) openTaskDialog(task, null, card);
+      }
+    });
+
+    els.columnsBoard.addEventListener("keydown", (event) => {
+      if (event.target.closest("[data-card-action], a, button, input, textarea, select")) return;
+      const card = event.target.closest("[data-task-id]");
+      if (card && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        const task = state.items.find((item) => item.id === card.dataset.taskId);
+        if (task) openTaskDialog(task, null, card);
+      }
+    });
+
+    els.columnsBoard.addEventListener("dragstart", (event) => {
+      if (event.target.closest("button, a")) { event.preventDefault(); return; }
+      const card = event.target.closest("[data-task-id]");
+      if (!card) return;
+      state.draggedItemId = card.dataset.taskId;
+      card.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", state.draggedItemId);
+      }
+    });
+    els.columnsBoard.addEventListener("dragend", () => {
+      state.draggedItemId = null;
+      document.querySelectorAll(".task-card.dragging").forEach((card) => card.classList.remove("dragging"));
+      document.querySelectorAll(".column.drag-over").forEach((column) => column.classList.remove("drag-over"));
+    });
+    els.columnsBoard.addEventListener("dragover", (event) => {
+      const column = event.target.closest(".column");
+      if (!column || !state.draggedItemId) return;
+      event.preventDefault();
+      column.classList.add("drag-over");
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    });
+    els.columnsBoard.addEventListener("dragleave", (event) => {
+      const column = event.target.closest(".column");
+      if (column && !column.contains(event.relatedTarget)) column.classList.remove("drag-over");
+    });
+    els.columnsBoard.addEventListener("drop", async (event) => {
+      const column = event.target.closest(".column");
+      if (!column || !state.draggedItemId) return;
+      event.preventDefault();
+      column.classList.remove("drag-over");
+      const card = event.target.closest("[data-task-id]");
+      const movingId = state.draggedItemId;
+      const beforeId = card && card.dataset.taskId !== movingId ? card.dataset.taskId : null;
+      state.draggedItemId = null;
+      await moveTask(movingId, column.dataset.columnId, beforeId);
+    });
+
+    els.searchInput.addEventListener("input", renderColumns);
+    els.priorityFilter.addEventListener("change", renderColumns);
+    $("#refreshButton").addEventListener("click", () => refreshWorkspace(true));
+    $("#sidebarToggle").addEventListener("click", () => document.body.classList.toggle("sidebar-collapsed"));
+
+    document.querySelectorAll("[data-close]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const dialog = document.getElementById(button.dataset.close);
+        if (dialog?.open) dialog.close();
+      });
+    });
+    [els.boardDialog, els.columnDialog, els.taskDialog].forEach((dialog) => {
+      dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) {
+        event.preventDefault();
+        els.searchInput.focus();
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        els.searchInput.focus();
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && els.taskDialog.open) {
+        event.preventDefault();
+        els.taskForm.requestSubmit();
+      }
+    });
+  }
+
+  async function init() {
+    bindEvents();
+    await refreshWorkspace();
+  }
+
+  init();
+})();

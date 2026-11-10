@@ -1,0 +1,148 @@
+
+# Dependencies
+node_modules/
+
+# Environment variables / Secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Runtime data
+uploads/
+temp/
+tmp/const express = require("express");
+const path = require("path");
+const http = require("http");
+const { Server } = require("socket.io");
+require("dotenv").config();
+
+const pool = require("./config/database");
+const boardRoutes = require("./routes/boardRoutes");
+const columnRoutes = require("./routes/columnRoutes");
+const itemRoutes = require("./routes/itemRoutes");
+const linkPreviewRoutes = require("./routes/linkPreviewRoutes");
+const knowledgeRoutes = require("./routes/knowledgeRoutes");
+const transferRoutes = require("./routes/transferRoutes");
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: false }, maxHttpBufferSize: 1e6 });
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, "../public")));
+app.use("/api/boards", boardRoutes);
+app.use("/api/columns", columnRoutes);
+app.use("/api/items", itemRoutes);
+app.use("/api/link-preview", linkPreviewRoutes);
+app.use("/api/knowledge", knowledgeRoutes);
+app.use("/api/transfers", transferRoutes);
+app.use("/uploads", express.static(path.resolve(__dirname, "../uploads")));
+
+const devices = new Map();
+const socketsByDevice = new Map();
+function publicDevices() {
+  return [...devices.values()].map(({ id, name, platform, connectedAt, lastSeen }) => ({
+    id, name, platform, connectedAt, lastSeen
+  }));
+}
+function publishDevices() { io.emit("devices:list", publicDevices()); }
+
+io.on("connection", socket => {
+  socket.on("device:register", info => {
+    if (!info || typeof info.id !== "string" || info.id.length > 100) return;
+    const device = {
+      id: info.id, name: String(info.name || "Device").slice(0, 100),
+      platform: String(info.platform || "Browser").slice(0, 100),
+      userAgent: String(info.userAgent || "").slice(0, 300),
+      connectedAt: new Date().toISOString(), lastSeen: Date.now(), socketId: socket.id
+    };
+    devices.set(device.id, device);
+    socketsByDevice.set(device.id, socket.id);
+    socket.data.deviceId = device.id;
+    publishDevices();
+  });
+  socket.on("transfer:send", payload => {
+    const sender = devices.get(socket.data.deviceId);
+    if (!sender || !payload || typeof payload !== "object") return;
+    const targetSocket = socketsByDevice.get(payload.toDeviceId);
+    if (!targetSocket) return socket.emit("transfer:error", { message:"Cihaz artık bağlı değil." });
+    const safe = { kind:payload.kind, fromDeviceId:sender.id, fromName:sender.name, sentAt:Date.now() };
+    if (payload.kind === "text") safe.text = String(payload.text || "").slice(0, 50000);
+    if (payload.kind === "link") safe.url = String(payload.url || "").slice(0, 2048);
+    if (payload.kind === "file") {
+      safe.url = String(payload.url || "").slice(0, 2048);
+      safe.fileName = String(payload.fileName || "file").slice(0, 255);
+      safe.mimeType = String(payload.mimeType || "application/octet-stream").slice(0, 120);
+      safe.size = Number(payload.size || 0);
+    }
+    io.to(targetSocket).emit("transfer:incoming", safe);
+    socket.emit("transfer:sent", { toDeviceId:payload.toDeviceId });
+  });
+  socket.on("workspace:changed", payload => {
+    if (!socket.data.deviceId) return;
+    const sender = devices.get(socket.data.deviceId);
+    const event = { ...payload, deviceId:socket.data.deviceId, deviceName:sender?.name || "Other device" };
+    socket.broadcast.emit("workspace:changed", event);
+    if (payload?.entity === "items" && payload?.id) {
+      socket.broadcast.emit("item:updated", { ...event, itemId:String(payload.id) });
+    }
+  });
+  socket.on("item:editing", payload => {
+    if (!socket.data.deviceId || !payload?.itemId) return;
+    socket.broadcast.emit("item:editing", { ...payload, deviceId:socket.data.deviceId, updatedAt:Date.now() });
+  });
+  socket.on("item:editing:stop", payload => {
+    if (!socket.data.deviceId || !payload?.itemId) return;
+    socket.broadcast.emit("item:editing:stop", { ...payload, deviceId:socket.data.deviceId });
+  });
+  socket.on("disconnect", () => {
+    const id = socket.data.deviceId;
+    if (id && devices.get(id)?.socketId === socket.id) {
+      devices.delete(id); socketsByDevice.delete(id); publishDevices();
+      socket.broadcast.emit("item:editing:stop", { deviceId:id });
+    }
+  });
+});
+
+app.get("/api/health", async (_req, res) => {
+  try { await pool.query("SELECT 1"); res.json({ status:"online", database:"connected" }); }
+  catch (error) { console.error(error); res.status(500).json({ status:"error", database:"disconnected" }); }
+});
+
+const PORT = process.env.PORT || 3169;
+server.listen(PORT, () => console.log(`Workboard running at http://localhost:${PORT}`));
+
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+
+# Local databases and backups
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.backup
+
+# Misc
+*.swp
+*.swo
+*.bak
